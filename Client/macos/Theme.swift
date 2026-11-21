@@ -238,6 +238,10 @@ struct SwitchRow<Label: View>: View {
             Toggle(title, isOn: isOn)
                 .labelsHidden()
                 .toggleStyle(SwitchToggleStyle(tint: theme.palette(colorScheme).accent))
+                // macOS native switch rendering also resolves its color through the accent
+                // environment; keep it consistent with the explicit switch-style tint.
+                .tint(theme.palette(colorScheme).accent)
+                .accentColor(theme.palette(colorScheme).accent)
         }
     }
 }

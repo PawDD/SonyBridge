@@ -345,6 +345,269 @@ int main()
 	xm6.setEqualizerPreset(EQ_PRESET::OFF);
 	require(observedXm6->sent(bytes({ 0x58, 0x04, 0x00, 0x00 })), "XM6 preset must use inquired type 04");
 
+	// WH-1000XM4C firmware 1.1.2: real capability list includes 57 (EQ 04) and 6a (ANC 16).
+	auto fakeXm4c = std::make_unique<FakeV2Connector>();
+	auto* observedXm4c = fakeXm4c.get();
+	observedXm4c->reply = [](const Buffer& request) -> Buffer {
+		if (request == bytes({0x06, 0x00})) return bytes({0x07, 0x00, 0x03, 0x57, 0x0c, 0x6a, 0x04, 0xf2, 0x06});
+		if (request == bytes({0x56, 0x04}))
+			return bytes({0x57, 0x04, 0x00, 0x0a, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6});
+		if (request == bytes({0x66, 0x16})) return bytes({0x67, 0x16, 0x01, 0x01, 0x00, 0x02, 0x01, 0x0a});
+		if (request == bytes({0xf6, 0x02})) return bytes({0xf7, 0x02, 0x01, 0x01});
+		if (request == bytes({0x50, 0x04, 0x01}))
+			return bytes({0x51, 0x04, 0x0a, 0x0d, 0x09, 0x00, 0x00, 0x30, 0x00, 0x31, 0x00,
+				0x32, 0x00, 0x33, 0x00, 0x20, 0x00, 0xa0, 0x00, 0xa1, 0x00, 0xa2, 0x00});
+		return {};
+	};
+	BluetoothWrapper bluetoothXm4c(std::move(fakeXm4c));
+	Headphones xm4c(bluetoothXm4c);
+	xm4c.setDeviceName("WH-1000XM4C");
+	xm4c.requestEqualizer();
+	require(xm4c.isTenBandEqualizer() && xm4c.getEqualizerBandCount() == 10,
+		"XM4C ten-band EQ must be discovered from the response");
+	require(xm4c.getEqualizerBand(9) == 6 && xm4c.getClearBass() == 0,
+		"XM4C raw ten-band values must not be interpreted as five-band values plus Clear Bass");
+	xm4c.setEqualizerCustom(0, {0, 1, 2, 3, 4, 5, 6, 7, 8, 12});
+	require(observedXm4c->sentPayloads.back() == bytes({0x58, 0x04, 0xa0, 0x0a, 0, 1, 2, 3, 4, 5, 6, 7, 8, 12}),
+		"XM4C must send ten bands using advertised subtype 04");
+	xm4c.requestAmbientState();
+	require(xm4c.getAmbientSoundControl() && xm4c.getAsmLevel() == 0 && xm4c.getFocusOnVoice(),
+		"XM4C subtype 16 must decode NC mode with voice byte at offset 6");
+	xm4c.setAmbientSoundControl(true);
+	xm4c.setAsmLevel(10);
+	xm4c.setFocusOnVoice(false);
+	xm4c.setChanges();
+	require(observedXm4c->sentPayloads.back() == bytes({0x68, 0x16, 0x01, 0x01, 0x01, 0x02, 0x00, 0x0a}),
+		"XM4C Ambient command must include the separate NC value byte");
+	xm4c.setAsmLevel(0);
+	xm4c.setChanges();
+	require(observedXm4c->sentPayloads.back() == bytes({0x68, 0x16, 0x01, 0x01, 0x00, 0x02, 0x00, 0x01}),
+		"XM4C ANC command must use the captured subtype 16 layout");
+	require(!observedXm4c->sent(bytes({0x66, 0x17})), "XM4C must not keep polling unsupported ANC subtype 17");
+	require(xm4c.hasWindNoiseReduction() && !xm4c.getWindNoiseReduction(),
+		"Subtype 16 must expose the dual/single ANC selector");
+	xm4c.setWindNoiseReduction(true);
+	require(xm4c.isChanged(), "Changing only the wind variant must schedule an ANC write");
+	xm4c.requestAmbientState(); // Stale dual reply must not erase the pending single choice.
+	require(xm4c.isChanged(), "A poll must not discard a pending wind-mode change");
+	xm4c.setChanges();
+	require(observedXm4c->sentPayloads.back() == bytes({0x68, 0x16, 1, 1, 0, 1, 0, 1}),
+		"Wind reduction must write single NC at offset 5");
+	auto beforeWindReadReply = observedXm4c->reply;
+	observedXm4c->reply = [beforeWindReadReply](const Buffer& request) -> Buffer {
+		if (request == bytes({0x66, 0x16})) return bytes({0x67, 0x16, 1, 1, 0, 1, 0, 1});
+		return beforeWindReadReply(request);
+	};
+	xm4c.requestAmbientState();
+	require(xm4c.getWindNoiseReduction(), "Single NC readback must report wind reduction");
+	xm4c.setWindNoiseReduction(false);
+	xm4c.setChanges();
+	require(observedXm4c->sentPayloads.back() == bytes({0x68, 0x16, 1, 1, 0, 2, 0, 1}),
+		"Normal noise cancelling must restore dual NC");
+	observedXm4c->reply = beforeWindReadReply;
+	xm4c.requestAmbientState();
+	xm4c.setWindNoiseReduction(true);
+	xm4c.discardAmbientChanges();
+	require(!xm4c.isChanged(), "Failed wind writes must allow later polling and retries");
+	xm4c.probeCapabilities();
+	require(xm4c.hasSpeakToChat() && !xm4c.getSpeakToChat(), "XM4C must read advertised type-1 Speak-to-Chat");
+	require(!observedXm4c->sent(bytes({0xf6, 0x0c})), "XM4C must not probe unadvertised type-2 Speak-to-Chat");
+	require(!observedXm4c->sent(bytes({0xf6, 0x0a})), "XM4C must not probe unadvertised adaptive volume");
+	auto beforeUnadvertisedSlot = observedXm4c->sentPayloads.size();
+	expectRecoverable([&] { xm4c.setEqualizerCustom(0, std::vector<int>(10, 6), EQ_PRESET::CUSTOM_1); },
+		"Numbered slot edits must wait for device advertisement");
+	require(observedXm4c->sentPayloads.size() == beforeUnadvertisedSlot, "Unconfirmed custom slot must not send a write");
+	xm4c.requestEqualizerPresets();
+	auto advertisedPresets = xm4c.getEqualizerPresets();
+	require(advertisedPresets.size() == 9 && advertisedPresets[1].code == 0x30 && advertisedPresets[8].code == 0xa2,
+		"XM4C must expose all nine advertised EQ presets");
+	require(advertisedPresets[1].name.empty(), "empty device preset names must remain available for UI fallbacks");
+	auto writesBeforeRejectedPreset = observedXm4c->sentPayloads.size();
+	expectRecoverable([&] { xm4c.setEqualizerPreset(EQ_PRESET::BRIGHT); }, "unsupported legacy EQ preset must be rejected");
+	require(observedXm4c->sentPayloads.size() == writesBeforeRejectedPreset, "unadvertised preset must not send a SET");
+	xm4c.setEqualizerPreset(EQ_PRESET::HEAVY);
+	require(observedXm4c->sent(bytes({0x58, 0x04, 0x30, 0x00})), "advertised Heavy preset must use its real ID");
+
+	// Reconstructed stateful fixtures: each numbered slot must retain its own curve.
+	auto originalXm4cReply = observedXm4c->reply;
+	unsigned char activeSlot = 0xa0;
+	std::vector<Buffer> slotCurves(3, Buffer(10, 6));
+	Buffer timing = bytes({0xfb, 0x02, 0x01, 0x00, 0x01});
+	bool malformedTiming = false;
+	observedXm4c->reply = [&](const Buffer& request) -> Buffer {
+		if (request == bytes({0xf0, 0x02})) return bytes({0xf1, 0x02, 0x00, 5, 15, 30});
+		if (request == bytes({0xfa, 0x02})) return malformedTiming ? bytes({0xfb, 0x02, 0x00}) : timing;
+		if (request.size() == 5 && (unsigned char)request[0] == 0xfc) {
+			timing = request; timing[0] = (char)0xfb; return {};
+		}
+		if (request.size() >= 4 && request[0] == 0x58 && request[1] == 0x04) {
+			activeSlot = (unsigned char)request[2];
+			if (request.size() == 14) slotCurves[activeSlot - 0xa0] = Buffer(request.begin() + 4, request.end());
+			return {};
+		}
+		if (request == bytes({0x56, 0x04}) && activeSlot >= 0xa0 && activeSlot <= 0xa2) {
+			Buffer response = bytes({0x57, 0x04, activeSlot, 0x0a});
+			response.insert(response.end(), slotCurves[activeSlot - 0xa0].begin(), slotCurves[activeSlot - 0xa0].end());
+			return response;
+		}
+		return originalXm4cReply(request);
+	};
+	for (auto slot : {EQ_PRESET::CUSTOM_1, EQ_PRESET::CUSTOM_2}) {
+		std::vector<int> curve(10, slot == EQ_PRESET::CUSTOM_1 ? 3 : 9);
+		xm4c.setEqualizerCustom(0, curve, slot);
+		require((unsigned char)observedXm4c->sentPayloads.back()[2] == (unsigned char)slot,
+			"Custom edits must address the selected slot, not Manual");
+		xm4c.requestEqualizer();
+		require(xm4c.getEqualizerPreset() == slot && xm4c.getEqualizerBand(9) == curve[9],
+			"Custom write must read back the selected slot and curve");
+	}
+	xm4c.setEqualizerPreset(EQ_PRESET::CUSTOM_1);
+	xm4c.requestEqualizer();
+	require(xm4c.getEqualizerBand(0) == 3, "Custom 2 edits must not overwrite Custom 1");
+	xm4c.requestSpeakToChatTiming();
+	require(xm4c.hasSpeakToChatTiming() && xm4c.getSpeakToChatTimeout() == 1 &&
+		xm4c.getSpeakToChatTimeoutSeconds() == std::vector<int>({5, 15, 30}),
+		"Speak-to-Chat choices must come from device capabilities");
+	// Simulate a phone changing the other fields after discovery.
+	timing[2] = 2; timing[3] = 1;
+	for (int option : {0, 1, 2, 3}) {
+		xm4c.setSpeakToChatTimeout(option);
+		require(observedXm4c->sentPayloads.back() == bytes({0xfc, 0x02, 0x02, 0x01, (unsigned char)option}),
+			"Timeout write must preserve freshly read sensitivity and voice focus");
+		xm4c.requestSpeakToChatTiming();
+		require(xm4c.getSpeakToChatTimeout() == option, "Timeout readback must decode every option");
+	}
+	malformedTiming = true;
+	auto timingWritesBefore = std::count(observedXm4c->sentPayloads.begin(), observedXm4c->sentPayloads.end(), bytes({0xfc, 0x02, 0x02, 0x01, 0x01}));
+	expectRecoverable([&] { xm4c.setSpeakToChatTimeout(1); }, "Malformed read must block timing SET");
+	require(std::count(observedXm4c->sentPayloads.begin(), observedXm4c->sentPayloads.end(), bytes({0xfc, 0x02, 0x02, 0x01, 0x01})) == timingWritesBefore,
+		"Failed timing read must not send a guessed setting");
+	for (auto invalid : {bytes({0xfb, 0x02, 3, 0, 0}), bytes({0xfb, 0x02, 0, 2, 0}), bytes({0xfb, 0x02, 0, 0, 4})}) {
+		malformedTiming = false; timing = invalid;
+		auto before = observedXm4c->sentPayloads.size();
+		expectRecoverable([&] { xm4c.setSpeakToChatTimeout(1); }, "Invalid shared fields must block timeout writes");
+		require(observedXm4c->sentPayloads.size() == before + 1, "Only the read may be sent for invalid shared fields");
+	}
+	observedXm4c->reply = originalXm4cReply;
+
+	xm4c.setSpeakToChat(true);
+	require(observedXm4c->sentPayloads.back() == bytes({0xf8, 0x02, 0x00, 0x01}), "XM4C Speak-to-Chat SET must use subtype 02");
+
+	// A failed read-back must not confirm the values optimistically cached by a SET.
+	observedXm4c->reply = [](const Buffer& request) -> Buffer {
+		if (request == bytes({0xf6, 0x02})) return bytes({0xf7, 0x02});
+		if (request == bytes({0x26, 0x05})) return bytes({0x27, 0x05, 0x7f, 0x00});
+		if (request == bytes({0xe6, 0x01})) return bytes({0xe7, 0x01});
+		if (request == bytes({0x56, 0x04})) return bytes({0x57, 0x04, 0xa0});
+		return {};
+	};
+	expectRecoverable([&] { xm4c.requestSpeakToChat(); }, "truncated Speak-to-Chat read-back must fail");
+	for (const auto& response : {bytes({0xf7, 0x02, 0x00}), bytes({0xf7, 0x02, 0x00, 0x02})}) {
+		observedXm4c->reply = [response](const Buffer& request) -> Buffer {
+			return request == bytes({0xf6, 0x02}) ? response : Buffer{};
+		};
+		expectRecoverable([&] { xm4c.requestSpeakToChat(); }, "Incomplete or invalid preview state must not confirm Speak-to-Chat");
+	}
+	observedXm4c->reply = [](const Buffer& request) -> Buffer {
+		if (request == bytes({0x26, 0x05})) return bytes({0x27, 0x05, 0x7f, 0x00});
+		if (request == bytes({0xe6, 0x01})) return bytes({0xe7, 0x01});
+		if (request == bytes({0x56, 0x04})) return bytes({0x57, 0x04, 0xa0});
+		return {};
+	};
+	expectRecoverable([&] { xm4c.requestAutoPowerOff(); }, "unknown auto power-off option must not become Off");
+	expectRecoverable([&] { xm4c.requestDsee(); }, "truncated DSEE read-back must fail");
+	expectRecoverable([&] { xm4c.requestEqualizer(); }, "truncated ten-band read-back must fail");
+
+	// Connection-priority layouts are selected from capabilities, independently of DSEE.
+	for (unsigned char function : {0xe1, 0xe3}) {
+		auto fakeQuality = std::make_unique<FakeV2Connector>();
+		auto* observedQuality = fakeQuality.get();
+		unsigned char subtype = function == 0xe1 ? 0x00 : 0x02;
+		int priority = 0;
+		bool malformed = false;
+		unsigned char codec = 0x02;
+		observedQuality->reply = [&](const Buffer& request) -> Buffer {
+			if (request == bytes({0x06, 0x00})) return bytes({0x07, 0x00, 1, function, 1});
+			if (request == bytes({0x12, 0x02})) return bytes({0x13, 0x02, codec});
+			if (request == bytes({0xe6, subtype}))
+				return malformed ? bytes({0xe7, subtype, 0x7f}) : bytes({0xe7, subtype, (unsigned char)priority});
+			return {};
+		};
+		BluetoothWrapper qualityBluetooth(std::move(fakeQuality));
+		Headphones qualityHeadphones(qualityBluetooth);
+		qualityHeadphones.setDeviceName("WH-1000XM4C");
+		qualityHeadphones.requestConnectionQuality();
+		require(qualityHeadphones.hasConnectionQuality() && qualityHeadphones.getConnectionQuality() == 0,
+			"Sound-quality priority must be read from the advertised subtype");
+		for (const auto& item : std::vector<std::pair<unsigned char, std::string>>{{0, "Negotiating"}, {1, "SBC"}, {2, "AAC"}, {0x10, "LDAC"}}) {
+			codec = item.first;
+			qualityHeadphones.requestCodec();
+			require(qualityHeadphones.hasCodec() && qualityHeadphones.getCodec() == item.second,
+				"Codec inquiry must report the current device value, including negotiation");
+		}
+		codec = 0xfe;
+		expectRecoverable([&] { qualityHeadphones.requestCodec(); }, "Unknown codec must fail, not retain the previous codec");
+		require(!qualityHeadphones.hasCodec() && qualityHeadphones.getCodec().empty(), "Failed codec read must clear stale display");
+		priority = 1;
+		qualityHeadphones.requestConnectionQuality();
+		require(qualityHeadphones.getConnectionQuality() == 1, "Read-only priority must reflect changes made externally");
+		malformed = true;
+		expectRecoverable([&] { qualityHeadphones.requestConnectionQuality(); }, "Unknown priority must fail the refresh");
+		require(std::none_of(observedQuality->sentPayloads.begin(), observedQuality->sentPayloads.end(), [](const Buffer& payload) {
+			return !payload.empty() && (unsigned char)payload[0] == 0xe8;
+		}), "Connection-priority and codec discovery must never send an audio-setting write");
+	}
+	{
+		auto unsupported = std::make_unique<FakeV2Connector>();
+		auto* observed = unsupported.get();
+		observed->reply = [](const Buffer& request) -> Buffer {
+			if (request == bytes({0x06, 0x00})) return bytes({0x07, 0x00, 1, 0xe7, 1});
+			return {};
+		};
+		BluetoothWrapper bluetooth(std::move(unsupported));
+		Headphones headphones(bluetooth);
+		headphones.setDeviceName("WH-1000XM4C");
+		expectRecoverable([&] { headphones.requestConnectionQuality(); }, "Do not guess an LE Audio connection layout");
+		require(!headphones.hasConnectionQuality() && observed->sentPayloads.size() == 1,
+			"Unsupported layout must not expose controls or probe guessed subtypes");
+	}
+
+	auto malformedCapabilities = std::make_unique<FakeV2Connector>();
+	auto* observedMalformed = malformedCapabilities.get();
+	observedMalformed->reply = [](const Buffer& request) -> Buffer {
+		if (request == bytes({0x06, 0x00})) return bytes({0x07, 0x00, 0x02, 0x57, 0x0c});
+		return {};
+	};
+	BluetoothWrapper malformedBluetooth(std::move(malformedCapabilities));
+	Headphones malformedHeadphones(malformedBluetooth);
+	malformedHeadphones.setDeviceName("WH-1000XM4C");
+	malformedHeadphones.setAmbientSoundControl(true);
+	malformedHeadphones.setAsmLevel(10);
+	expectRecoverable([&] { malformedHeadphones.setChanges(); }, "truncated capabilities must prevent writes");
+	require(observedMalformed->sentPayloads.size() == 1 && observedMalformed->sentPayloads[0] == bytes({0x06, 0x00}),
+		"capability failure must not send an ANC SET");
+
+	for (const auto& badPresets : {
+		bytes({0x51, 0x04}),
+		bytes({0x51, 0x04, 0x0a, 0x0d, 0x01, 0xa0, 0x04, 'x'}),
+		bytes({0x51, 0x04, 0x0a, 0x0d, 0x02, 0x00, 0x00, 0x00, 0x00}),
+		bytes({0x51, 0x04, 0x0a, 0x0d, 0x00, 0x7f}) })
+	{
+		auto malformedPresets = std::make_unique<FakeV2Connector>();
+		malformedPresets->reply = [badPresets](const Buffer& request) -> Buffer {
+			if (request == bytes({0x06, 0x00})) return bytes({0x07, 0x00, 0x02, 0x57, 0x0c, 0x6a, 0x04});
+			if (request == bytes({0x56, 0x04})) return bytes({0x57, 0x04, 0x00, 0x0a, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6});
+			if (request == bytes({0x50, 0x04, 0x01})) return badPresets;
+			return {};
+		};
+		BluetoothWrapper presetBluetooth(std::move(malformedPresets));
+		Headphones presetHeadphones(presetBluetooth);
+		presetHeadphones.setDeviceName("WH-1000XM4C");
+		presetHeadphones.requestEqualizer();
+		expectRecoverable([&] { presetHeadphones.requestEqualizerPresets(); }, "malformed preset list must be rejected");
+		require(presetHeadphones.getEqualizerPresets().empty(), "malformed list must not publish partial presets");
+	}
+
 	// Any other v2 headset that answered 66 17 with zeros must not be read as "Off" either.
 	auto fakeZeros = std::make_unique<FakeV2Connector>();
 	fakeZeros->reply = [](const Buffer& request) -> Buffer {

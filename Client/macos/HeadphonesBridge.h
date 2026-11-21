@@ -24,6 +24,11 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 @property (nonatomic, readonly) BOOL isThisMac;
 @end
 
+@interface SHCEqualizerPreset : NSObject
+@property (nonatomic, readonly) NSInteger code;
+@property (nonatomic, copy, readonly) NSString *name;
+@end
+
 @interface HeadphonesBridge : NSObject
 
 @property (nonatomic, readonly) BOOL connected;
@@ -32,6 +37,8 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 @property (nonatomic, copy, readonly, nullable) NSString *protocolVersionString; // "v1" / "v2"
 
 // Only meaningful while connected.
+@property (nonatomic, readonly) BOOL hasWindNoiseReduction;
+@property (nonatomic, readonly) BOOL windNoiseReduction;
 @property (nonatomic, readonly) BOOL supportsVpt;        // v1 protocol devices only
 @property (nonatomic, readonly) NSInteger maxAmbientLevel; // 1...20 on supported devices
 
@@ -55,6 +62,7 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 @property (nonatomic, readonly) NSInteger clearBass;      // -10..10
 @property (nonatomic, readonly) NSInteger equalizerBandCount; // 5, or 10 on the ten-band layout
 @property (nonatomic, readonly) BOOL tenBandEqualizer;   // WH-1000XM6: raw 0..12 bands, no clear bass
+@property (nonatomic, copy, readonly) NSArray<SHCEqualizerPreset *> *equalizerPresets;
 @property (nonatomic, readonly) BOOL supportsDsee;        // true after a successful read-only probe
 @property (nonatomic, readonly) BOOL dsee;                // DSEE / audio upsampling
 
@@ -65,8 +73,15 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 @property (nonatomic, copy, readonly, nullable) NSString *firmware;
 @property (nonatomic, readonly) BOOL hasCodec;
 @property (nonatomic, copy, readonly, nullable) NSString *codec;
+@property (nonatomic, readonly) BOOL hasConnectionQuality;
+@property (nonatomic, readonly) NSInteger connectionQuality;
+- (void)refreshConnectionInfoWithCompletion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 @property (nonatomic, readonly) BOOL hasSpeakToChat;
 @property (nonatomic, readonly) BOOL speakToChat;
+@property (nonatomic, readonly) BOOL hasSpeakToChatTiming;
+@property (nonatomic, readonly) NSInteger speakToChatTimeout;
+@property (nonatomic, copy, readonly) NSArray<NSNumber *> *speakToChatTimeoutSeconds;
+- (void)setSpeakToChatTimeout:(NSInteger)option completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 @property (nonatomic, readonly) BOOL hasAdaptiveVolume;
 @property (nonatomic, readonly) BOOL adaptiveVolume;
 
@@ -89,6 +104,7 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 - (void)applyMode:(SHCAmbientMode)mode
             level:(NSInteger)level
        focusVoice:(BOOL)focusVoice
+    windReduction:(BOOL)windReduction
        completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 
 // Runs the init handshake (once) then reads battery + equalizer on a background thread; completion on main.
@@ -97,11 +113,11 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 // Pushes an equalizer preset (raw EQ_PRESET byte) to the device; completion on main.
 - (void)setEqualizerPreset:(NSInteger)preset completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 
-// Current custom EQ band value (-10..10) for band 0..4.
+// Current band value: -10..10 for five-band EQ, or 0..12 for ten-band EQ.
 - (NSInteger)equalizerBandAtIndex:(NSInteger)index;
 
-// Pushes manual/custom EQ (clear bass + 5 bands, each -10..10) to the device.
-- (void)setCustomEqualizerBass:(NSInteger)bass bands:(NSArray<NSNumber *> *)bands completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
+// Writes the selected editable EQ slot (5 bands + bass, or 10 raw bands).
+- (void)setCustomEqualizerBass:(NSInteger)bass bands:(NSArray<NSNumber *> *)bands preset:(NSInteger)preset completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 
 // Toggles DSEE / audio upsampling.
 - (void)setDsee:(BOOL)enabled completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;

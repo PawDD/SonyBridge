@@ -90,6 +90,8 @@ namespace V2Command
 	// fixed (0x64 0x64 on 22 09, 0x1e on 22 0a) across that change, which rules them out as per-earbud
 	// levels but leaves their meaning unknown - don't reuse them without a sample that moves them.
 	inline constexpr unsigned char EQ_GET       = 0x56; // payload: 56 00
+	inline constexpr unsigned char EQ_CAP_GET   = 0x50; // 50 <subtype> <language>
+	inline constexpr unsigned char EQ_CAP_RET   = 0x51; // 51 <subtype> <bands> <steps> <count> {id, name length, name}
 	inline constexpr unsigned char EQ_RET       = 0x57; // reply: 57 00 <preset> 06 <bass+10> <b1..b5 +10>
 	inline constexpr unsigned char EQ_SET       = 0x58; // preset: 58 00 <preset> 00 ; custom: 58 00 A0 06 <bass+10> <b1..b5 +10>
 	inline constexpr unsigned char DSEE_GET     = 0xe6; // payload: e6 01
@@ -182,7 +184,14 @@ enum class EQ_PRESET : unsigned char
 	TREBLE_BOOST = 0x15,
 	BASS_BOOST = 0x16,
 	SPEECH = 0x17,
-	MANUAL = 0xa0
+	GAMING = 0x20,
+	HEAVY = 0x30,
+	CLEAR = 0x31,
+	HARD = 0x32,
+	SOFT = 0x33,
+	MANUAL = 0xa0,
+	CUSTOM_1 = 0xa1,
+	CUSTOM_2 = 0xa2
 };
 
 #define APP_NAME "SonyBridge " __HEADPHONES_APP_VERSION__

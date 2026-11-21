@@ -62,6 +62,9 @@ struct QuickControlsView: View {
         }
 
         AmbientModeControl(model: model)
+            if model.hasWindNoiseReduction && model.mode == .noiseCanceling {
+                NoiseCancelingVariantControl(model: model)
+            }
 
         if model.mode == .ambientSound {
             HStack(spacing: 10) {
@@ -79,19 +82,32 @@ struct QuickControlsView: View {
             }
         }
 
-        if model.supportsEqualizer || model.hasPlaybackPinState {
-            VStack(alignment: .leading, spacing: 12) {
-                if model.supportsEqualizer {
-                    equalizerRow
-                }
-                if model.supportsEqualizer && model.hasPlaybackPinState {
-                    Divider().background(palette.cardStroke)
-                }
-                if model.hasPlaybackPinState {
-                    playbackRow
+        if model.supportsEqualizer {
+            equalizerRow
+                .themedCard(compact: true)
+        }
+
+        if model.supportsDsee {
+            SwitchRow("DSEE", isOn: Binding(
+                get: { model.dsee },
+                set: { model.setDsee($0) }
+            )) {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .foregroundColor(model.dsee ? palette.accent : palette.secondary)
+                    Text("DSEE")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(model.dsee ? palette.accentText : palette.primary)
                 }
             }
+            .controlSize(.small)
+            .disabled(model.dseeBusy)
             .themedCard(compact: true)
+        }
+
+        if model.hasPlaybackPinState {
+            playbackRow
+                .themedCard(compact: true)
         }
 
         errorText
@@ -107,11 +123,12 @@ struct QuickControlsView: View {
                 get: { model.eqPreset },
                 set: { model.setEqualizer($0) }
             )) {
-                ForEach(EQPresets.list(tenBand: model.tenBandEqualizer), id: \.1) { preset in
-                    Text(preset.0).tag(preset.1)
+                ForEach(model.availableEqualizerPresets) { preset in
+                    Text(preset.name).tag(preset.id)
                 }
             }
             .pickerStyle(MenuPickerStyle())
+            .disabled(model.equalizerSelecting)
             .labelsHidden()
             .frame(width: 120)
             .accentColor(palette.accent)

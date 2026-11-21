@@ -2,54 +2,62 @@ name: macOS
 
 on:
   push:
-    branches:
-    - master
+    branches: [main, 'feature/**']
   pull_request:
-    branches:
-    - master
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        os: ["macos-latest"]
-        include:
-          - os: macos-latest
-            binary_path: Client/build/SonyHeadphonesClient.zip
-            artifact_name: "SonyHeadphonesClient-macOS.zip"
-    runs-on: ${{ matrix.os }}
-
+  tests:
+    runs-on: macos-latest
     steps:
-    - uses: actions/checkout@v3
-      with:
-        submodules: true
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Protocol, read-back, connector and preset presentation tests
+        run: sh Client/tests/run-macos.sh
 
-    - name: Create build directory
-      working-directory: ${{github.workspace}}/Client
-      run: mkdir build
-
-    - name: Build
-      working-directory: ${{github.workspace}}/Client/build
-      # Execute the build.
-      run: xcodebuild -project '../macos/SonyHeadphonesClient.xcodeproj' -config Release -scheme 'SonyHeadphonesClient' -archivePath ./archive archive | xcpretty
-
-    - name: Export archive to .app
-      working-directory: ${{github.workspace}}/Client/build
-      # Exports the archive to a .app file
-      run: xcodebuild -exportArchive -archivePath ./archive.xcarchive -exportPath ./ -exportOptionsPlist ../macos/exportOptions.plist | xcpretty
-
-    - name: Zip the exported file
-      working-directory: ${{github.workspace}}/Client/build
-      # Zip the application for easier downloading
-      run: zip -r SonyHeadphonesClient.zip SonyHeadphonesClient.app
-
-    - name: Upload the zipped application
-      uses: actions/upload-artifact@v3
-      with:
-        # Artifact name
-        name: ${{ matrix.artifact_name }}
-        # A file, directory or wildcard pattern that describes what to upload
-        path: ${{github.workspace}}/${{matrix.binary_path}}
-        # The desired behavior if no files are found using the provided path.
-
-
+  build:
+    needs: tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Build universal macOS application from source
+        run: |
+          xcodebuild -project Client/macos/SonyHeadphonesClient.xcodeproj \
+            -scheme SonyHeadphonesClient -configuration Release \
+            -destination 'generic/platform=macOS' -derivedDataPath build/macOS \
+            -hideShellScriptEnvironment \
+            ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM='' build
+      - name: Verify and package application
+        run: |
+          mkdir -p dist
+          ditto build/macOS/Build/Products/Release/SonyHeadphonesClient.app dist/SonyBridge.app
+          codesign --verify --deep --strict dist/SonyBridge.app
+          architectures="$(lipo -archs dist/SonyBridge.app/Contents/MacOS/SonyHeadphonesClient)"
+          for required_arch in arm64 x86_64; do
+            case " $architectures " in
+              *" $required_arch "*) ;;
+              *) echo "Missing required architecture: $required_arch"; exit 1 ;;
+            esac
+          done
+          ditto -c -k --sequesterRsrc --keepParent dist/SonyBridge.app dist/SonyBridge-XM4C-macOS.zip
+          shasum -a 256 dist/SonyBridge-XM4C-macOS.zip > dist/SonyBridge-XM4C-macOS.zip.sha256
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: SonyBridge-XM4C-macOS
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            dist/SonyBridge-XM4C-macOS.zip
+            dist/SonyBridge-XM4C-macOS.zip.sha256

@@ -25,6 +25,12 @@ struct Property {
 	bool isFulfilled();
 };
 
+struct EqualizerPresetInfo
+{
+	unsigned char code;
+	std::string name; // May be empty; the UI supplies a known-code label or a numeric fallback.
+};
+
 class Headphones {
 public:
 	Headphones(BluetoothWrapper& conn);
@@ -39,6 +45,9 @@ public:
 	bool isSetAsmLevelAvailable();
 	void setAsmLevel(int val);
 	int getAsmLevel();
+	bool hasWindNoiseReduction();
+	bool getWindNoiseReduction();
+	void setWindNoiseReduction(bool enabled);
 
 	void setSurroundPosition(SOUND_POSITION_PRESET val);
 	SOUND_POSITION_PRESET getSurroundPosition();
@@ -52,6 +61,8 @@ public:
 	// Model name of the connected device (e.g. "WF-1000XM5"). Only a hint: it picks which battery
 	// layout to probe first, so set it before the first requestBattery() to save a timed-out inquiry.
 	void setDeviceName(const std::string& name);
+	// XM4C writes need a fresh read-back: a transport ACK alone is not confirmation.
+	bool requiresWriteReadback();
 
 	// Battery. getBatteryLevel() returns -1 until requestBattery() succeeds.
 	// For TWS earbuds requestBattery() also fills the per-earbud + case levels (hasDualBattery()).
@@ -69,12 +80,14 @@ public:
 
 	// Equalizer. Wire subtypes and the custom-preset byte differ between protocol generations.
 	void requestEqualizer();
+	void requestEqualizerPresets();
+	std::vector<EqualizerPresetInfo> getEqualizerPresets();
 	bool hasEqualizer();
 	EQ_PRESET getEqualizerPreset();
 	void setEqualizerPreset(EQ_PRESET preset);
-	// Custom (manual) EQ. Selects the MANUAL preset. Standard layout: 5 bands + clear bass, each in [-10, 10].
+	// Editable EQ. Defaults to MANUAL; advertised XM4C Custom 1/2 slots are explicit targets. Standard layout: 5 bands + clear bass, each in [-10, 10].
 	// Ten-band layout (WH-1000XM6): 10 raw device steps in [0, 12], no clear bass (ignored).
-	void setEqualizerCustom(int clearBass, const std::vector<int>& bands);
+	void setEqualizerCustom(int clearBass, const std::vector<int>& bands, EQ_PRESET target = EQ_PRESET::MANUAL);
 	int getClearBass();
 	int getEqualizerBand(int index);
 	int getEqualizerBandCount();
@@ -97,6 +110,8 @@ public:
 	bool hasAutoPowerOff();
 	int getAutoPowerOff();               // index into the option list (0=Off,1=5m,2=30m,3=1h,4=3h,5=when taken off)
 	void setAutoPowerOff(int index);
+	// Strict V2 reads: throw on timeout/malformed responses instead of retaining cached state.
+	void requestAutoPowerOff();
 
 	bool hasFirmware();
 	std::string getFirmware();
@@ -106,6 +121,16 @@ public:
 	bool hasSpeakToChat();
 	bool getSpeakToChat();
 	void setSpeakToChat(bool enabled);
+	void requestSpeakToChat();
+	void requestConnectionQuality();
+	void requestCodec();
+	bool hasConnectionQuality();
+	int getConnectionQuality();
+	void requestSpeakToChatTiming();
+	bool hasSpeakToChatTiming();
+	int getSpeakToChatTimeout();
+	std::vector<int> getSpeakToChatTimeoutSeconds();
+	void setSpeakToChatTimeout(int option);
 
 	bool hasAdaptiveVolume();
 	bool getAdaptiveVolume();
@@ -165,11 +190,29 @@ private:
 	// The WH-1000XM6 speaks a different layout for two v2 commands: noise-control state is read via inquired
 	// type 0x19 (0x17 answers all zeros), and the equalizer uses inquired type 0x04 with 10 raw bands.
 	bool _isWh1000Xm6() const;
+	bool _isWh1000Xm4c() const;
+	void _discoverXm4cControlLayouts();
+	bool _controlLayoutsRead = false;
+	int _connectionQualitySubtype = -1;
+	bool _hasConnectionQuality = false;
+	int _connectionQuality = 0;
+	bool _v2NoiseControlSupported = true;
+	bool _v2EqualizerSupported = true;
+	unsigned char _v2NoiseControlType = 0x17;
+	Property<int> _v2NcValue = {2, 2};
+	bool _hasWindNoiseReduction = false;
+	unsigned char _v2SpeakToChatSubtype = 0x0c;
+	bool _v2SpeakToChatSupported = true;
+	bool _v2AdaptiveVolumeSupported = true;
 	// Both return false if the device didn't answer that battery sub-type.
 	bool _requestDualBattery(unsigned char subType);
 	bool _requestSingleBattery(unsigned char subType, int& levelOut, bool& chargingOut);
 	EQ_PRESET _eqPreset = EQ_PRESET::OFF;
 	bool _hasEqualizer = false;
+	bool _tenBandEqualizer = false;
+	unsigned char _eqSubtype = 0x00;
+	bool _eqPresetsRead = false;
+	std::vector<EqualizerPresetInfo> _eqPresets;
 	std::vector<int> _eqBands = { 0, 0, 0, 0, 0 };
 	int _eqClearBass = 0;
 	bool _dsee = false;
@@ -179,6 +222,9 @@ private:
 	bool _hasFirmware = false; std::string _firmware;
 	bool _hasCodec = false; std::string _codec;
 	bool _hasSpeakToChat = false; bool _speakToChat = false;
+	bool _hasSpeakToChatTiming = false;
+	int _speakToChatTimeout = 0;
+	std::vector<int> _speakToChatTimeoutSeconds;
 	bool _hasAdaptiveVolume = false; bool _adaptiveVolume = false;
 
 	Buffer _initReply;

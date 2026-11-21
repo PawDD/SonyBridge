@@ -533,3 +533,18 @@ Client/imgui.ini
 Client/linux/sonyheadphonesclient.build/
 
 .superpowers/
+
+# Local device diagnostics, development builds, and credentials must stay out of Git.
+/local/
+/build/
+/dist/
+*.app/
+*.zip
+*.log
+*.btsnoop
+*.pcap
+*.pcapng
+.env
+.env.*
+!.env.example
+.DS_Store

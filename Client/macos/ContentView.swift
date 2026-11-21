@@ -6,9 +6,12 @@
 import SwiftUI
 import AppKit
 
+// Resolve the property wrapper explicitly when the SDK also provides a State macro.
+private typealias SHCState<Value> = SwiftUI.State<Value>
+
 struct ContentView: View {
     @StateObject private var model = HeadphonesModel.shared
-    @State private var showAbout = false
+    @SHCState private var showAbout = false
     @AppStorage(AppTheme.storageKey) private var theme = AppTheme.refinedDark
     @Environment(\.colorScheme) private var colorScheme
 
@@ -104,7 +107,7 @@ struct ContentView: View {
         if model.supportsDsee {
             dseeCard
         }
-        if model.hasAdaptiveVolume || model.hasSpeakToChat || model.hasAutoPowerOff || model.hasMultipointSetting {
+        if model.hasConnectionQuality || model.hasAdaptiveVolume || model.hasSpeakToChat || model.hasAutoPowerOff || model.hasMultipointSetting {
             settingsCard
         }
         if let error = model.errorMessage {
@@ -129,12 +132,13 @@ struct ContentView: View {
                 .buttonStyle(PlainButtonStyle())
             }
 
-            // Product-style banner. Generic headphone graphic (device-specific Sony renders are
-            // copyrighted and can't be bundled) over the theme's backdrop, mirroring Sony's app layout.
+            // Product image or generic fallback, over the theme's decorative backdrop.
+            // Manufacturer asset attribution is recorded in docs/ASSET_SOURCES.md.
             ZStack {
                 HeroBackdrop()
                 ProductImage(deviceName: model.deviceName, size: 190)
             }
+            .allowsHitTesting(false)
 
             Text(model.deviceName)
                 .font(.system(size: 24, weight: .bold))
@@ -152,6 +156,8 @@ struct ContentView: View {
             .frame(width: 32, height: 32)
             .background(palette.raised, in: Circle())
             .overlay(Circle().strokeBorder(palette.cardStroke, lineWidth: 1))
+            // Plain buttons must accept clicks throughout their frame, not just the symbol.
+            .contentShape(Rectangle())
     }
 
     private func cardTitle(_ title: String) -> some View {
@@ -165,6 +171,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 16) {
             cardTitle("Ambient Sound Control")
             AmbientModeControl(model: model)
+            if model.hasWindNoiseReduction && model.mode == .noiseCanceling {
+                NoiseCancelingVariantControl(model: model)
+            }
         }
         .themedCard()
     }
@@ -197,11 +206,12 @@ struct ContentView: View {
             cardTitle("Equalizer")
             EQPreview(bands: model.eqBands, range: model.tenBandEqualizer ? 0...12 : -10...10)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                ForEach(EQPresets.list(tenBand: model.tenBandEqualizer), id: \.1) { preset in
-                    eqChip(preset.0, preset.1)
+                ForEach(model.availableEqualizerPresets) { preset in
+                    eqChip(preset.name, preset.id)
+                        .disabled(model.equalizerSelecting)
                 }
             }
-            if model.eqPreset == 0xA0 {
+            if EQPresets.isEditable(model.eqPreset) && !model.equalizerSelecting {
                 Divider().background(palette.cardStroke)
                 let labels = model.tenBandEqualizer ? tenBandEqLabels : eqBandLabels
                 ForEach(0..<min(model.eqBands.count, labels.count), id: \.self) { i in
@@ -238,11 +248,18 @@ struct ContentView: View {
 
     private var dseeCard: some View {
         SwitchRow("DSEE", isOn: Binding(get: { model.dsee }, set: { model.setDsee($0) })) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("DSEE").font(.system(size: 14, weight: .semibold)).foregroundColor(palette.primary)
-                Text("Upscale compressed audio").font(.system(size: 11)).foregroundColor(palette.secondary)
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .foregroundColor(model.dsee ? palette.accent : palette.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("DSEE")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(model.dsee ? palette.accentText : palette.primary)
+                    Text("Upscale compressed audio").font(.system(size: 11)).foregroundColor(palette.secondary)
+                }
             }
         }
+        .disabled(model.dseeBusy)
         .themedCard()
     }
 
@@ -270,6 +287,24 @@ struct ContentView: View {
             if model.hasSpeakToChat {
                 settingToggle("Speak-to-Chat", "Pause music when you talk",
                               on: model.speakToChat) { model.setSpeakToChat($0) }
+                if model.hasSpeakToChatTiming {
+                    HStack {
+                        Text("End after speaking").foregroundColor(palette.primary)
+                        Spacer()
+                        Picker("End after speaking", selection: Binding(
+                            get: { model.speakToChatTimeout },
+                            set: { model.setSpeakToChatTimeout($0) }
+                        )) {
+                            ForEach(0..<model.speakToChatTimeoutSeconds.count, id: \.self) { i in
+                                Text("\(model.speakToChatTimeoutSeconds[i]) sec").tag(i)
+                            }
+                            Text("Do not close automatically").tag(3)
+                        }
+                        .labelsHidden()
+                        .frame(width: 190)
+                        .disabled(model.speakToChatTimingBusy)
+                    }
+                }
                 SwitchRow("Keep off on connect", isOn: $model.keepSpeakToChatOff) {
                     Text("Keep off on connect")
                         .font(.system(size: 11))
@@ -277,6 +312,38 @@ struct ContentView: View {
                 }
                 .controlSize(.small)
                 .padding(.leading, 12)
+            }
+            if model.hasConnectionQuality {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Bluetooth Connection Quality")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(palette.primary)
+                    HStack {
+                        Text("Read-only on macOS")
+                            .font(.system(size: 11))
+                            .foregroundColor(palette.secondary)
+                        Spacer(minLength: 12)
+                        Picker("Bluetooth Connection Quality", selection: .constant(model.connectionQuality)) {
+                            Text("Prioritize Sound Quality").tag(0)
+                            Text("Prioritize Stable Connection").tag(1)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(MenuPickerStyle())
+                        .frame(width: 190, alignment: .trailing)
+                        .disabled(true)
+                    }
+                    HStack {
+                        Text("Headset-reported codec: \(model.codec.isEmpty ? "Unavailable" : model.codec)")
+                            .font(.system(size: 11))
+                            .foregroundColor(palette.secondary)
+                        Spacer()
+                        Button(action: model.refreshConnectionInfo) {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                        .help("Read connection priority and codec without changing settings")
+                        .disabled(model.refreshingConnectionInfo)
+                    }
+                }
             }
             if model.hasMultipointSetting {
                 settingToggle("Connect to 2 devices", "Stay paired to two devices at once",
@@ -540,20 +607,6 @@ struct ContentView: View {
 
 // MARK: - Shared with the menu-bar panel
 
-enum EQPresets {
-    static let fiveBand: [(String, Int)] = [
-        ("Off", 0x00), ("Bright", 0x10), ("Excited", 0x11),
-        ("Mellow", 0x12), ("Relaxed", 0x13), ("Vocal", 0x14),
-        ("Treble", 0x15), ("Bass", 0x16), ("Speech", 0x17),
-        ("Manual", 0xA0)
-    ]
-    // WH-1000XM6: only Off and Custom have confirmed preset codes on the ten-band layout; its other preset
-    // bytes (0x20, 0x30-0x33, 0xa1-0xa2) are unnamed, and the 5-band codes above don't apply to it.
-    static let tenBand: [(String, Int)] = [("Off", 0x00), ("Custom", 0xA0)]
-
-    static func list(tenBand: Bool) -> [(String, Int)] { tenBand ? Self.tenBand : fiveBand }
-}
-
 extension SHCAmbientMode {
     var displayName: String {
         switch self {
@@ -573,12 +626,20 @@ struct ProductImage: View {
     @Environment(\.appTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
 
+    private var assetName: String {
+        deviceName.lowercased().replacingOccurrences(of: " ", with: "-")
+    }
+
     var body: some View {
-        if let image = NSImage(named: deviceName.lowercased().replacingOccurrences(of: " ", with: "-")) {
+        if let image = NSImage(named: assetName) {
             Image(nsImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: size, height: size)
+                // The generated transparent cutout keeps padding around the product; use more of
+                // the existing frame while keeping the full headphone silhouette visible.
+                .scaleEffect(assetName == "wh-1000xm4c" ? 1.3 : 1)
+                .clipped()
         } else {
             Image(systemName: "headphones")
                 .font(.system(size: size * 0.48, weight: .thin))
@@ -701,6 +762,23 @@ struct AmbientModeControl: View {
                 .shadow(color: selected ? palette.selectedShadow : .clear, radius: 8)
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct NoiseCancelingVariantControl: View {
+    @ObservedObject var model: HeadphonesModel
+
+    var body: some View {
+        Picker("Noise Canceling mode", selection: Binding(
+            get: { model.windNoiseReduction },
+            set: { model.setWindNoiseReduction($0) }
+        )) {
+            Text("Noise Canceling").tag(false)
+            Text("Wind Noise Reduction").tag(true)
+        }
+        .labelsHidden()
+        .pickerStyle(MenuPickerStyle())
+        .frame(maxWidth: .infinity, alignment: .trailing)
     }
 }
 

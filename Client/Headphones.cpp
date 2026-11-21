@@ -59,6 +59,15 @@ int Headphones::getAsmLevel()
 	return this->_asmLevel.current;
 }
 
+bool Headphones::hasWindNoiseReduction() { std::lock_guard guard(this->_propertyMtx); return this->_hasWindNoiseReduction; }
+bool Headphones::getWindNoiseReduction() { std::lock_guard guard(this->_propertyMtx); return this->_v2NcValue.current == 1; }
+void Headphones::setWindNoiseReduction(bool enabled)
+{
+	std::lock_guard guard(this->_propertyMtx);
+	if (!this->_hasWindNoiseReduction) throw RecoverableException("Wind noise reduction has not been confirmed");
+	this->_v2NcValue.desired = enabled ? 1 : 2;
+}
+
 void Headphones::setSurroundPosition(SOUND_POSITION_PRESET val)
 {
 	std::lock_guard guard(this->_propertyMtx);
@@ -119,6 +128,52 @@ bool Headphones::_isWh1000Xm6() const
 	std::string name;
 	for (char c : this->_deviceName) name.push_back((char)std::tolower((unsigned char)c));
 	return name.find("wh-1000xm6") != std::string::npos || name.find("wh1000xm6") != std::string::npos;
+}
+
+bool Headphones::_isWh1000Xm4c() const
+{
+	std::string name;
+	for (char c : this->_deviceName) name.push_back((char)std::tolower((unsigned char)c));
+	return name.find("wh-1000xm4c") != std::string::npos || name.find("wh1000xm4c") != std::string::npos;
+}
+
+bool Headphones::requiresWriteReadback()
+{
+	std::lock_guard guard(this->_propertyMtx);
+	return this->_conn.getProtocolVersion() == SonyProtocolVersion::V2 && this->_isWh1000Xm4c();
+}
+
+// XM4C capability response captured on firmware 1.1.2 advertises function 6a
+// (NC/ASM subtype 16) and 57 (EQ subtype 04). Do not infer these from "XM4".
+void Headphones::_discoverXm4cControlLayouts()
+{
+	if (this->_controlLayoutsRead || this->_conn.getProtocolVersion() != SonyProtocolVersion::V2) return;
+	if (!this->_isWh1000Xm4c()) return;
+	auto resp = this->_conn.sendCommandAndReadResponse({0x06, 0x00}, 0x07, 0x00);
+	if (resp.size() < 3 || resp.size() < 3 + 2 * (unsigned char)resp[2])
+		throw RecoverableException("Truncated XM4C capability response", false);
+	int qualitySubtype = -1;
+	bool nc = false, eq = false, speakType1 = false, speakType2 = false, adaptive = false;
+	for (size_t i = 0; i < (unsigned char)resp[2]; ++i) {
+		unsigned char function = resp[3 + 2 * i];
+		if (function == 0xe1 && qualitySubtype < 0) qualitySubtype = 0x00;
+		if (function == 0xe3) qualitySubtype = 0x02;
+		if (function == 0x6a) nc = true;
+		if (function == 0x57) eq = true;
+		if (function == 0xf2) speakType1 = true;
+		if (function == 0xfc) speakType2 = true;
+		if (function == 0xfa) adaptive = true;
+	}
+	std::lock_guard guard(this->_propertyMtx);
+	this->_v2NoiseControlSupported = nc;
+	this->_v2EqualizerSupported = eq;
+	this->_v2NoiseControlType = 0x16;
+	this->_eqSubtype = 0x04;
+	this->_v2SpeakToChatSubtype = speakType2 ? 0x0c : 0x02;
+	this->_v2SpeakToChatSupported = speakType1 || speakType2;
+	this->_v2AdaptiveVolumeSupported = adaptive;
+	this->_connectionQualitySubtype = qualitySubtype;
+	this->_controlLayoutsRead = true;
 }
 
 // Reads the per-earbud (and case) levels. Returns false if the device didn't answer this sub-type or
@@ -264,50 +319,81 @@ bool Headphones::isBatteryCaseCharging() { std::lock_guard guard(this->_property
 
 void Headphones::requestEqualizer()
 {
+	this->_discoverXm4cControlLayouts();
+	if (!this->_v2EqualizerSupported) throw RecoverableException("This device does not advertise a supported EQ layout");
 	auto isV1 = this->_conn.getProtocolVersion() == SonyProtocolVersion::V1;
-	if (!isV1 && this->_isWh1000Xm6())
-	{
-		// GET 56 04 -> RET 57 04 <preset> <count=0a> <b1..b10>, raw device steps 0..12 with no bias and no
-		// clear-bass slot. Layout from a Sound Connect btsnoop capture, verified on a WH-1000XM6 (fw 3.1.5)
-		// by sony-device-center (marconvcm/sony-device-center#44). The legacy 56 00 frame is ACKed but ignored.
-		auto resp = this->_conn.sendCommandAndReadResponse(
-			{ (char)V2Command::EQ_GET, (char)V2Command::EQ_TEN_BAND }, V2Command::EQ_RET, V2Command::EQ_TEN_BAND);
-		if (resp.size() < 4) return;
-		size_t count = (unsigned char)resp[3];
-		if (resp.size() < 4 + count) return;
-		std::lock_guard guard(this->_propertyMtx);
-		this->_eqPreset = static_cast<EQ_PRESET>((unsigned char)resp[2]);
-		this->_hasEqualizer = true;
-		this->_eqClearBass = 0;
-		this->_eqBands.assign(resp.begin() + 4, resp.begin() + 4 + count);
-		for (auto& band : this->_eqBands) band = (unsigned char)band;
-		return;
-	}
-	auto subtype = isV1 ? 0x01 : 0x00;
-	// v1 uses subtype 01; v2 uses subtype 00. Both return the same six-band value layout.
+	// XM4C also answers the compatibility GET 00, but advertises subtype 04 for writes.
+	// Choose the advertised subtype and decode the band count in the reply.
+	unsigned char subtype = isV1 ? 0x01 : this->_isWh1000Xm6() ? V2Command::EQ_TEN_BAND : this->_eqSubtype;
 	auto resp = this->_conn.sendCommandAndReadResponse(
-		{ (char)(isV1 ? V1Command::EQ_GET : V2Command::EQ_GET), (char)subtype },
-		isV1 ? V1Command::EQ_RET : V2Command::EQ_RET,
-		subtype
-	);
-	if (resp.size() >= 3)
+		{ (char)V2Command::EQ_GET, (char)subtype }, V2Command::EQ_RET, subtype);
+	if (resp.size() < 3) throw RecoverableException("Truncated equalizer response", false);
+	unsigned count = resp.size() >= 4 ? (unsigned char)resp[3] : 0;
+	bool expectedTen = !isV1 && (this->_isWh1000Xm6() || this->_tenBandEqualizer ||
+		(this->_controlLayoutsRead && this->_eqSubtype == 0x04));
+	if (expectedTen && count != 10)
+		throw RecoverableException("Missing ten-band equalizer values", false);
+	if (count && ((count != 6 && count != 10) || resp.size() < 4 + count))
+		throw RecoverableException("Unsupported equalizer band layout", false);
+	if (isV1 && count == 10) throw RecoverableException("Unexpected ten-band legacy equalizer", false);
+	if (count == 10) {
+		for (size_t i = 4; i < 14; ++i)
+			if ((unsigned char)resp[i] > 12) throw RecoverableException("Invalid ten-band equalizer value", false);
+	}
+	std::lock_guard guard(this->_propertyMtx);
+	auto preset = (unsigned char)resp[2];
+	this->_eqPreset = isV1 && preset == V1Command::MANUAL_EQ ? EQ_PRESET::MANUAL : static_cast<EQ_PRESET>(preset);
+	this->_hasEqualizer = true;
+	this->_eqSubtype = subtype;
+	if (count == 10) {
+		this->_tenBandEqualizer = true;
+		this->_eqClearBass = 0;
+		this->_eqBands.clear();
+		for (size_t i = 4; i < 14; ++i) this->_eqBands.push_back((unsigned char)resp[i]);
+	} else if (count == 6) {
+		this->_tenBandEqualizer = false;
+		this->_eqClearBass = (unsigned char)resp[4] - 10;
+		this->_eqBands.resize(5);
+		for (int i = 0; i < 5; ++i) this->_eqBands[i] = (unsigned char)resp[5 + i] - 10;
+	}
+}
+
+void Headphones::requestEqualizerPresets()
+{
+	if (this->_conn.getProtocolVersion() != SonyProtocolVersion::V2 || !this->isTenBandEqualizer()) return;
 	{
 		std::lock_guard guard(this->_propertyMtx);
-		auto rawPreset = (unsigned char)resp[2];
-		this->_eqPreset = (isV1 && rawPreset == V1Command::MANUAL_EQ)
-			? EQ_PRESET::MANUAL
-			: static_cast<EQ_PRESET>(rawPreset);
-		this->_hasEqualizer = true;
-		// When band data is present (57 00 <preset> 06 <bass+10> <b1..b5+10>), decode the -10..10 values.
-		if (resp.size() >= 10)
-		{
-			this->_eqClearBass = (unsigned char)resp[4] - 10;
-			for (int i = 0; i < 5; i++)
-			{
-				this->_eqBands[i] = (unsigned char)resp[5 + i] - 10;
-			}
-		}
+		if (this->_eqPresetsRead) return;
 	}
+	// Language 01 requests English names. XM4C 1.1.2 returns valid IDs with empty names.
+	auto response = this->_conn.sendCommandAndReadResponse(
+		{ (char)V2Command::EQ_CAP_GET, (char)this->_eqSubtype, 0x01 }, V2Command::EQ_CAP_RET, this->_eqSubtype);
+	if (response.size() < 5 || (unsigned char)response[2] != 10 || (unsigned char)response[3] != 13)
+		throw RecoverableException("Unsupported ten-band EQ capability response");
+	const size_t count = (unsigned char)response[4];
+	size_t position = 5;
+	bool seen[256] = {};
+	std::vector<EqualizerPresetInfo> presets;
+	for (size_t i = 0; i < count; ++i)
+	{
+		if (response.size() - position < 2) throw RecoverableException("Truncated EQ preset list");
+		unsigned char code = response[position++];
+		size_t length = (unsigned char)response[position++];
+		if (length > response.size() - position || seen[code]) throw RecoverableException("Invalid EQ preset entry");
+		seen[code] = true;
+		presets.push_back({ code, std::string(response.begin() + position, response.begin() + position + length) });
+		position += length;
+	}
+	if (position != response.size()) throw RecoverableException("Unexpected trailing EQ preset data");
+	std::lock_guard guard(this->_propertyMtx);
+	this->_eqPresets = std::move(presets);
+	this->_eqPresetsRead = true;
+}
+
+std::vector<EqualizerPresetInfo> Headphones::getEqualizerPresets()
+{
+	std::lock_guard guard(this->_propertyMtx);
+	return this->_eqPresets;
 }
 
 bool Headphones::hasEqualizer() { std::lock_guard guard(this->_propertyMtx); return this->_hasEqualizer; }
@@ -320,13 +406,19 @@ EQ_PRESET Headphones::getEqualizerPreset()
 void Headphones::setEqualizerPreset(EQ_PRESET preset)
 {
 	if (!this->hasEqualizer()) throw std::logic_error("Equalizer capability has not been confirmed");
+	{
+		std::lock_guard guard(this->_propertyMtx);
+		if (this->_eqPresetsRead && std::none_of(this->_eqPresets.begin(), this->_eqPresets.end(),
+			[&](const EqualizerPresetInfo& entry) { return entry.code == (unsigned char)preset; }))
+			throw RecoverableException("This EQ preset is not advertised by the headphones");
+	}
 	auto isV1 = this->_conn.getProtocolVersion() == SonyProtocolVersion::V1;
 	auto rawPreset = (unsigned char)preset;
 	if (isV1 && preset == EQ_PRESET::MANUAL) rawPreset = V1Command::MANUAL_EQ;
 	// SET preset: v1 58 01 <preset> 00; v2 58 00 <preset> 00; ten-band v2 58 04 <preset> 00.
 	this->_conn.sendCommand({
 		(char)(isV1 ? V1Command::EQ_SET : V2Command::EQ_SET),
-		(char)(isV1 ? 0x01 : this->_isWh1000Xm6() ? V2Command::EQ_TEN_BAND : 0x00),
+		(char)(isV1 ? 0x01 : this->_eqSubtype),
 		(char)rawPreset,
 		0x00
 	});
@@ -348,22 +440,31 @@ void Headphones::setEqualizerPreset(EQ_PRESET preset)
 	}
 }
 
-void Headphones::setEqualizerCustom(int clearBass, const std::vector<int>& bands)
+void Headphones::setEqualizerCustom(int clearBass, const std::vector<int>& bands, EQ_PRESET target)
 {
 	if (!this->hasEqualizer()) throw std::logic_error("Equalizer capability has not been confirmed");
 	auto isV1 = this->_conn.getProtocolVersion() == SonyProtocolVersion::V1;
-	if (!isV1 && this->_isWh1000Xm6())
+	if (target != EQ_PRESET::MANUAL) {
+		std::lock_guard guard(this->_propertyMtx);
+		if (isV1 || !this->_isWh1000Xm4c() ||
+			(target != EQ_PRESET::CUSTOM_1 && target != EQ_PRESET::CUSTOM_2) ||
+			!this->_eqPresetsRead || std::none_of(this->_eqPresets.begin(), this->_eqPresets.end(),
+				[&](const EqualizerPresetInfo& entry) { return entry.code == (unsigned char)target; }))
+			throw RecoverableException("This editable EQ slot is not advertised by the headphones");
+	}
+	if (!isV1 && this->isTenBandEqualizer())
 	{
-		// SET 58 04 a0 <count> <b1..bN>, raw 0..12, no clear-bass slot.
+		if (bands.size() != 10) throw std::invalid_argument("Ten-band equalizer requires exactly ten values");
+		// SET 58 04 <editable preset> <count> <b1..bN>, raw 0..12, no clear-bass slot.
 		std::vector<int> raw(bands.begin(), bands.end());
 		for (auto& band : raw) band = std::clamp(band, 0, 12);
-		Buffer cmd = { (char)V2Command::EQ_SET, (char)V2Command::EQ_TEN_BAND,
-			(char)static_cast<unsigned char>(EQ_PRESET::MANUAL), (char)raw.size() };
+		Buffer cmd = { (char)V2Command::EQ_SET, (char)this->_eqSubtype,
+			(char)static_cast<unsigned char>(target), (char)raw.size() };
 		for (int band : raw) cmd.push_back((char)band);
 		this->_conn.sendCommand(cmd);
 
 		std::lock_guard guard(this->_propertyMtx);
-		this->_eqPreset = EQ_PRESET::MANUAL;
+		this->_eqPreset = target;
 		this->_eqBands = raw;
 		return;
 	}
@@ -372,7 +473,7 @@ void Headphones::setEqualizerCustom(int clearBass, const std::vector<int>& bands
 	Buffer cmd = {
 		(char)(isV1 ? V1Command::EQ_SET : V2Command::EQ_SET),
 		(char)(isV1 ? 0x01 : 0x00),
-		(char)(isV1 ? V1Command::MANUAL_EQ : static_cast<unsigned char>(EQ_PRESET::MANUAL)),
+		(char)(isV1 ? V1Command::MANUAL_EQ : static_cast<unsigned char>(target)),
 		0x06,
 		clamp(clearBass)
 	};
@@ -383,7 +484,7 @@ void Headphones::setEqualizerCustom(int clearBass, const std::vector<int>& bands
 	this->_conn.sendCommand(cmd);
 
 	std::lock_guard guard(this->_propertyMtx);
-	this->_eqPreset = EQ_PRESET::MANUAL;
+	this->_eqPreset = target;
 	this->_eqClearBass = std::clamp(clearBass, -10, 10);
 	for (int i = 0; i < 5; i++)
 	{
@@ -412,7 +513,7 @@ int Headphones::getEqualizerBandCount()
 bool Headphones::isTenBandEqualizer()
 {
 	std::lock_guard guard(this->_propertyMtx);
-	return this->_conn.getProtocolVersion() == SonyProtocolVersion::V2 && this->_isWh1000Xm6();
+	return this->_conn.getProtocolVersion() == SonyProtocolVersion::V2 && (this->_tenBandEqualizer || this->_isWh1000Xm6());
 }
 
 void Headphones::requestDsee()
@@ -424,6 +525,8 @@ void Headphones::requestDsee()
 		isV1 ? V1Command::DSEE_RET : V2Command::DSEE_RET,
 		subtype
 	);
+	if (this->requiresWriteReadback() && (resp.size() != 3 || (unsigned char)resp[2] > 1))
+		throw RecoverableException("Invalid DSEE response");
 	if ((!isV1 && resp.size() >= 3) || (isV1 && resp.size() >= 4))
 	{
 		std::lock_guard guard(this->_propertyMtx);
@@ -458,6 +561,8 @@ void Headphones::setDsee(bool enabled)
 
 void Headphones::requestAmbientState()
 {
+	this->_discoverXm4cControlLayouts();
+	if (!this->_v2NoiseControlSupported) throw RecoverableException("This device does not advertise a supported ANC layout");
 	// The NCASM inquired-type differs by protocol generation (v2=0x17, v1=0x02), and so does the reply
 	// layout. Sending the wrong one is what left v1 devices (WH-1000XM4) without valid handshake traffic.
 	auto protocolVersion = this->_conn.getProtocolVersion();
@@ -469,26 +574,35 @@ void Headphones::requestAmbientState()
 		// The WH-1000XM6 answers 66 17 with all zeros in every mode - parsing that as "off" is what snapped its
 		// UI back to Off (issue #11). It reports the same first seven bytes (plus two trailing ones) under
 		// inquired type 0x19, verified on fw 3.1.5 (marconvcm/sony-device-center#74).
-		unsigned char inquired = this->_isWh1000Xm6() ? V2Command::NCASM_TYPE_XM6 : V2Command::NCASM_TYPE;
+		unsigned char inquired = this->_isWh1000Xm6() ? V2Command::NCASM_TYPE_XM6 : this->_v2NoiseControlType;
 		auto resp = this->_conn.sendCommandAndReadResponse({ 0x66, (char)inquired }, 0x67, inquired);
+		if (inquired == 0x16 && (resp.size() != 8 || resp[2] != 1 ||
+			(unsigned char)resp[3] > 1 || (unsigned char)resp[4] > 1 ||
+			(unsigned char)resp[5] > 2 || (unsigned char)resp[6] > 1 || (unsigned char)resp[7] > 20))
+			throw RecoverableException("Invalid XM4C ANC response", false);
 		// Byte [2] is always 01 in a real reply; anything else (like the XM6's zeroed 0x17 answer) is not state.
 		if (resp.size() >= 7 && resp[2] == 0x01)
 		{
 			bool on = resp[3] != 0;
 			bool ambient = resp[4] != 0;
-			bool voice = resp[5] != 0;
-			int level = (unsigned char)resp[6];
+			const bool dualSingle = inquired == 0x16;
+			if (dualSingle && resp.size() != 8) throw RecoverableException("Invalid XM4C ANC response", false);
+			bool voice = resp[dualSingle ? 6 : 5] != 0;
+			int level = (unsigned char)resp[dualSingle ? 7 : 6];
 			std::lock_guard guard(this->_propertyMtx);
+			if (dualSingle) this->_hasWindNoiseReduction = true;
 			// A change the user just made may not be on the wire yet - the UI writes the desired values
 			// and only then queues the send - and this reply was produced before it. Adopting it would
 			// both revert the user's choice and clear the pending change (isChanged() goes false), so the
 			// command would never be sent at all. Leave everything alone until setChanges() has flushed it.
-			if (this->_ambientSoundControl.isFulfilled() && this->_asmLevel.isFulfilled() && this->_focusOnVoice.isFulfilled())
+			if (this->_ambientSoundControl.isFulfilled() && this->_asmLevel.isFulfilled() && this->_focusOnVoice.isFulfilled() && this->_v2NcValue.isFulfilled())
 			{
 				// Update both current and desired so the UI reflects reality and isChanged() stays false.
 				this->_ambientSoundControl.current = this->_ambientSoundControl.desired = on;
 				this->_asmLevel.current = this->_asmLevel.desired = ambient ? level : 0;
 				this->_focusOnVoice.current = this->_focusOnVoice.desired = voice;
+				if (dualSingle && ((unsigned char)resp[5] == 1 || (unsigned char)resp[5] == 2))
+					this->_v2NcValue.current = this->_v2NcValue.desired = (unsigned char)resp[5];
 			}
 		}
 	}
@@ -540,14 +654,52 @@ namespace
 	{
 		switch (code)
 		{
+			case 0x00: return "Negotiating";
 			case 0x01: return "SBC";
 			case 0x02: return "AAC";
 			case 0x10: return "LDAC";
 			case 0x20: return "aptX";
 			case 0x21: return "aptX HD";
+			case 0x30: return "LC3";
+			case 0xff: return "Other";
 			default:   return "";
 		}
 	}
+}
+
+void Headphones::requestAutoPowerOff()
+{
+	if (this->_conn.getProtocolVersion() != SonyProtocolVersion::V2)
+		throw std::logic_error("This auto power-off inquiry requires protocol v2");
+	auto response = this->_conn.sendCommandAndReadResponse(
+		{ (char)V2Command::APO_GET, 0x05 }, V2Command::APO_RET, 0x05);
+	if (response.size() != 4) throw RecoverableException("Invalid auto power-off response");
+	// Byte 2 is the current option. Byte 3 remembers the last selected timer;
+	// it need not equal the current option when auto power-off is disabled.
+	int option = -1;
+	for (int i = 0; i < 6; ++i)
+		if ((unsigned char)response[2] == APO_CODES[i].first) option = i;
+	if (option < 0) throw RecoverableException("Unknown auto power-off option");
+	std::lock_guard guard(this->_propertyMtx);
+	this->_autoPowerOff = option;
+	this->_hasAutoPowerOff = true;
+}
+
+void Headphones::requestSpeakToChat()
+{
+	if (this->_conn.getProtocolVersion() != SonyProtocolVersion::V2)
+		throw std::logic_error("This Speak-to-Chat inquiry requires protocol v2");
+	this->_discoverXm4cControlLayouts();
+	if (!this->_v2SpeakToChatSupported) throw RecoverableException("Speak-to-Chat is not advertised by this device");
+	auto response = this->_conn.sendCommandAndReadResponse(
+		{ (char)V2Command::BTNMODE_GET, (char)this->_v2SpeakToChatSubtype },
+		V2Command::BTNMODE_RET, this->_v2SpeakToChatSubtype);
+	if (response.size() < 3 || (unsigned char)response[2] > 1 ||
+		(this->requiresWriteReadback() && (response.size() != 4 || (unsigned char)response[3] > 1)))
+		throw RecoverableException("Invalid Speak-to-Chat response");
+	std::lock_guard guard(this->_propertyMtx);
+	this->_speakToChat = response[2] == 0;
+	this->_hasSpeakToChat = true;
 }
 
 void Headphones::probeCapabilities()
@@ -578,31 +730,66 @@ void Headphones::probeCapabilities()
 		return;
 	}
 
+	bool controlCapabilitiesAvailable = true;
+	try { this->_discoverXm4cControlLayouts(); } catch (const std::exception&) { controlCapabilitiesAvailable = false; }
+
 	try {
 		auto r = this->_conn.sendCommandAndReadResponse({ (char)V2Command::FW_GET, 0x02 }, V2Command::FW_RET);
 		if (r.size() > 3) { std::lock_guard g(this->_propertyMtx); this->_firmware = std::string(r.begin() + 3, r.end()); this->_hasFirmware = true; }
 	} catch (...) {}
 
-	try {
-		auto r = this->_conn.sendCommandAndReadResponse({ (char)V2Command::CODEC_GET, 0x02 }, V2Command::CODEC_RET);
-		if (r.size() >= 3) { auto n = codecName((unsigned char)r[2]); if (!n.empty()) { std::lock_guard g(this->_propertyMtx); this->_codec = n; this->_hasCodec = true; } }
-	} catch (...) {}
+	try { this->requestCodec(); } catch (const std::exception&) {}
 
-	try {
-		auto r = this->_conn.sendCommandAndReadResponse({ (char)V2Command::APO_GET, 0x05 }, V2Command::APO_RET);
-		if (r.size() >= 4) { std::lock_guard g(this->_propertyMtx); this->_autoPowerOff = apoIndexFromCode((unsigned char)r[2], (unsigned char)r[3]); this->_hasAutoPowerOff = true; }
-	} catch (...) {}
+	if (controlCapabilitiesAvailable && this->requiresWriteReadback())
+		try { this->requestConnectionQuality(); } catch (const std::exception&) {}
+	try { this->requestAutoPowerOff(); } catch (const std::exception&) {}
 
-	try {
+	if (controlCapabilitiesAvailable && this->_v2AdaptiveVolumeSupported) try {
 		auto r = this->_conn.sendCommandAndReadResponse({ (char)V2Command::BTNMODE_GET, (char)V2Command::SUB_ADAPTIVE_VOLUME }, V2Command::BTNMODE_RET, V2Command::SUB_ADAPTIVE_VOLUME);
 		if (r.size() >= 3) { std::lock_guard g(this->_propertyMtx); this->_adaptiveVolume = (r[2] == 0); this->_hasAdaptiveVolume = true; }
 	} catch (...) {}
 
-	try {
-		auto r = this->_conn.sendCommandAndReadResponse({ (char)V2Command::BTNMODE_GET, (char)V2Command::SUB_SPEAK_TO_CHAT }, V2Command::BTNMODE_RET, V2Command::SUB_SPEAK_TO_CHAT);
-		if (r.size() >= 3) { std::lock_guard g(this->_propertyMtx); this->_speakToChat = (r[2] == 0); this->_hasSpeakToChat = true; }
-	} catch (...) {}
+	if (controlCapabilitiesAvailable && this->_v2SpeakToChatSupported) try { this->requestSpeakToChat(); } catch (const std::exception&) {}
+	if (this->requiresWriteReadback() && this->hasSpeakToChat())
+		try { this->requestSpeakToChatTiming(); } catch (const std::exception&) {}
 }
+
+// Use the connection layout actually advertised by this XM4C, never a codec ID
+// or another model's LE Audio layout. ACK alone does not confirm application.
+void Headphones::requestCodec()
+{
+	if (this->_conn.getProtocolVersion() != SonyProtocolVersion::V2)
+		throw RecoverableException("This codec inquiry requires protocol v2");
+	try {
+		auto response = this->_conn.sendCommandAndReadResponse(
+			{(char)V2Command::CODEC_GET, 0x02}, V2Command::CODEC_RET, 0x02);
+		if (response.size() != 3) throw RecoverableException("Invalid codec response");
+		auto name = codecName((unsigned char)response[2]);
+		if (name.empty()) throw RecoverableException("Unknown codec response");
+		std::lock_guard guard(this->_propertyMtx);
+		this->_codec = name; this->_hasCodec = true;
+	} catch (...) {
+		std::lock_guard guard(this->_propertyMtx);
+		this->_codec.clear(); this->_hasCodec = false;
+		throw;
+	}
+}
+
+void Headphones::requestConnectionQuality()
+{
+	if (!this->requiresWriteReadback()) throw RecoverableException("Connection quality control is not supported on this device");
+	this->_discoverXm4cControlLayouts();
+	if (this->_connectionQualitySubtype < 0) throw RecoverableException("No supported connection quality layout was advertised");
+	auto response = this->_conn.sendCommandAndReadResponse(
+		{(char)0xe6, (char)this->_connectionQualitySubtype}, 0xe7, this->_connectionQualitySubtype);
+	if (response.size() != 3 || (unsigned char)response[2] > 1)
+		throw RecoverableException("Invalid connection quality response");
+	std::lock_guard guard(this->_propertyMtx);
+	this->_connectionQuality = (unsigned char)response[2];
+	this->_hasConnectionQuality = true;
+}
+bool Headphones::hasConnectionQuality() { std::lock_guard guard(this->_propertyMtx); return this->_hasConnectionQuality; }
+int Headphones::getConnectionQuality() { std::lock_guard guard(this->_propertyMtx); return this->_connectionQuality; }
 
 bool Headphones::hasAutoPowerOff() { std::lock_guard guard(this->_propertyMtx); return this->_hasAutoPowerOff; }
 int Headphones::getAutoPowerOff() { std::lock_guard guard(this->_propertyMtx); return this->_autoPowerOff; }
@@ -639,10 +826,42 @@ void Headphones::setSpeakToChat(bool enabled)
 	else
 	{
 		// v2 enable bit is inverted.
-		this->_conn.sendCommand({ (char)V2Command::BTNMODE_SET, (char)V2Command::SUB_SPEAK_TO_CHAT, (char)(enabled ? 0x00 : 0x01), 0x01 });
+		this->_conn.sendCommand({ (char)V2Command::BTNMODE_SET, (char)this->_v2SpeakToChatSubtype, (char)(enabled ? 0x00 : 0x01), 0x01 });
 	}
 	std::lock_guard guard(this->_propertyMtx);
 	this->_speakToChat = enabled;
+}
+
+// Read-modify-write the extended type-1 setting: timeout shares its packet with
+// sensitivity and voice focus. Never substitute defaults for those other fields.
+void Headphones::requestSpeakToChatTiming()
+{
+	if (!this->requiresWriteReadback() || !this->hasSpeakToChat() || this->_v2SpeakToChatSubtype != 0x02)
+		throw RecoverableException("Speak-to-Chat timing is not supported on this device");
+	auto cap = this->_conn.sendCommandAndReadResponse({(char)0xf0, 0x02}, 0xf1, 0x02);
+	if (cap.size() != 6 || (unsigned char)cap[2] > 1 || !cap[3] || !cap[4] || !cap[5])
+		throw RecoverableException("Invalid Speak-to-Chat timing capability");
+	auto state = this->_conn.sendCommandAndReadResponse({(char)0xfa, 0x02}, 0xfb, 0x02);
+	if (state.size() != 5 || (unsigned char)state[2] > 2 || (unsigned char)state[3] > 1 || (unsigned char)state[4] > 3)
+		throw RecoverableException("Invalid Speak-to-Chat timing response");
+	std::lock_guard guard(this->_propertyMtx);
+	this->_speakToChatTimeoutSeconds = {(unsigned char)cap[3], (unsigned char)cap[4], (unsigned char)cap[5]};
+	this->_speakToChatTimeout = (unsigned char)state[4];
+	this->_hasSpeakToChatTiming = true;
+}
+
+bool Headphones::hasSpeakToChatTiming() { std::lock_guard guard(this->_propertyMtx); return this->_hasSpeakToChatTiming; }
+int Headphones::getSpeakToChatTimeout() { std::lock_guard guard(this->_propertyMtx); return this->_speakToChatTimeout; }
+std::vector<int> Headphones::getSpeakToChatTimeoutSeconds() { std::lock_guard guard(this->_propertyMtx); return this->_speakToChatTimeoutSeconds; }
+void Headphones::setSpeakToChatTimeout(int option)
+{
+	if (option < 0 || option > 3) throw std::invalid_argument("Invalid Speak-to-Chat timeout option");
+	if (!this->hasSpeakToChatTiming()) throw RecoverableException("Speak-to-Chat timing has not been confirmed");
+	auto state = this->_conn.sendCommandAndReadResponse({(char)0xfa, 0x02}, 0xfb, 0x02);
+	if (state.size() != 5 || (unsigned char)state[2] > 2 || (unsigned char)state[3] > 1 || (unsigned char)state[4] > 3)
+		throw RecoverableException("Invalid Speak-to-Chat timing response");
+	this->_conn.sendCommand({(char)0xfc, 0x02, state[2], state[3], (char)option});
+	// The caller confirms application with a fresh inquiry, not this cached value.
 }
 
 bool Headphones::hasAdaptiveVolume() { std::lock_guard guard(this->_propertyMtx); return this->_hasAdaptiveVolume; }
@@ -963,12 +1182,13 @@ void Headphones::discardAmbientChanges()
 	this->_ambientSoundControl.desired = this->_ambientSoundControl.current;
 	this->_asmLevel.desired = this->_asmLevel.current;
 	this->_focusOnVoice.desired = this->_focusOnVoice.current;
+	this->_v2NcValue.desired = this->_v2NcValue.current;
 }
 
 bool Headphones::isChanged()
 {
 	std::lock_guard guard(this->_propertyMtx);
-	auto ambientChanged = !(this->_ambientSoundControl.isFulfilled() && this->_asmLevel.isFulfilled() && this->_focusOnVoice.isFulfilled());
+	auto ambientChanged = !(this->_ambientSoundControl.isFulfilled() && this->_asmLevel.isFulfilled() && this->_focusOnVoice.isFulfilled() && this->_v2NcValue.isFulfilled());
 	auto vptChanged = this->_conn.getProtocolVersion() == SonyProtocolVersion::V1 &&
 		!(this->_surroundPosition.isFulfilled() && this->_vptType.isFulfilled());
 	return ambientChanged || vptChanged;
@@ -976,10 +1196,13 @@ bool Headphones::isChanged()
 
 void Headphones::setChanges()
 {
+	this->_discoverXm4cControlLayouts();
+	if (!this->_v2NoiseControlSupported) throw RecoverableException("This device does not advertise a supported ANC layout");
 	auto protocolVersion = this->_conn.getProtocolVersion();
 	Property<bool> ambientSoundControl;
 	Property<bool> focusOnVoice;
 	Property<int> asmLevelProperty;
+	Property<int> ncValueProperty;
 	NC_ASM_SETTING_TYPE ncAsmSettingType;
 	ASM_SETTING_TYPE asmSettingType;
 	{
@@ -987,23 +1210,29 @@ void Headphones::setChanges()
 		ambientSoundControl = this->_ambientSoundControl;
 		focusOnVoice = this->_focusOnVoice;
 		asmLevelProperty = this->_asmLevel;
+		ncValueProperty = this->_v2NcValue;
 		ncAsmSettingType = this->_ncAsmSettingType;
 		asmSettingType = this->_asmSettingType;
 	}
 
-	if (!(ambientSoundControl.isFulfilled() && focusOnVoice.isFulfilled() && asmLevelProperty.isFulfilled()))
+	if (!(ambientSoundControl.isFulfilled() && focusOnVoice.isFulfilled() && asmLevelProperty.isFulfilled() && ncValueProperty.isFulfilled()))
 	{
 		if (protocolVersion == SonyProtocolVersion::V2)
 		{
 			// v2 has no separate "disabled" level - NC vs Ambient Sound is its own field, and level is 1-based.
 			char asmLevel = static_cast<char>(asmLevelProperty.desired > 0 ? asmLevelProperty.desired : 1);
 
-			this->_conn.sendCommand(CommandSerializer::serializeNcAndAsmSettingV2(
+			auto command = CommandSerializer::serializeNcAndAsmSettingV2(
 				ambientSoundControl.desired ? NC_ASM_EFFECT::ON : NC_ASM_EFFECT::OFF,
 				asmLevelProperty.desired > 0 ? NC_ASM_SETTING_TYPE_V2::AMBIENT_SOUND : NC_ASM_SETTING_TYPE_V2::NOISE_CANCELLING,
-				focusOnVoice.desired ? ASM_ID::VOICE : ASM_ID::NORMAL,
-				asmLevel
-			));
+				focusOnVoice.desired ? ASM_ID::VOICE : ASM_ID::NORMAL, asmLevel);
+			if (this->_v2NoiseControlType == 0x16) {
+				command[1] = 0x16;
+				// Subtype 16 has a separate NC single/dual byte before voice and ambient level.
+				// Layout: mos9527/libmdr NcAsmSetParamModeNcDualSingleModeSwitchAsmSeamless.
+				command.insert(command.begin() + 5, (char)ncValueProperty.desired);
+			}
+			this->_conn.sendCommand(command);
 		}
 		else
 		{
@@ -1028,6 +1257,7 @@ void Headphones::setChanges()
 		std::lock_guard guard(this->_propertyMtx);
 		if (this->_ambientSoundControl.desired == ambientSoundControl.desired) this->_ambientSoundControl.fulfill();
 		if (this->_asmLevel.desired == asmLevelProperty.desired) this->_asmLevel.fulfill();
+		if (this->_v2NcValue.desired == ncValueProperty.desired) this->_v2NcValue.fulfill();
 		if (this->_focusOnVoice.desired == focusOnVoice.desired) this->_focusOnVoice.fulfill();
 	}
 

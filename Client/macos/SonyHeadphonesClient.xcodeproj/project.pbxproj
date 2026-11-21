@@ -27,6 +27,7 @@
 		CC00000000000000000000A3 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000A4 /* MenuBarController.swift */; };
 		CC00000000000000000000A5 /* QuickControlsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000A6 /* QuickControlsView.swift */; };
 		DD0000000000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000002 /* Assets.xcassets */; };
+		CC00000000000000000000A7 /* EqualizerPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC00000000000000000000A8 /* EqualizerPresets.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -66,6 +67,7 @@
 		CC00000000000000000000A6 /* QuickControlsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickControlsView.swift; sourceTree = "<group>"; };
 		CC0000000000000000000008 /* SonyHeadphonesClient-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SonyHeadphonesClient-Bridging-Header.h"; sourceTree = "<group>"; };
 		DD0000000000000000000002 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		CC00000000000000000000A8 /* EqualizerPresets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EqualizerPresets.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -116,6 +118,7 @@
 				CC00000000000000000000A2 /* Theme.swift */,
 				CC00000000000000000000A4 /* MenuBarController.swift */,
 				CC00000000000000000000A6 /* QuickControlsView.swift */,
+				CC00000000000000000000A8 /* EqualizerPresets.swift */,
 				CC0000000000000000000008 /* SonyHeadphonesClient-Bridging-Header.h */,
 				DD0000000000000000000002 /* Assets.xcassets */,
 				A8DC790325769A6600447738 /* Frameworks */,
@@ -215,6 +218,7 @@
 				CC00000000000000000000A1 /* Theme.swift in Sources */,
 				CC00000000000000000000A3 /* MenuBarController.swift in Sources */,
 				CC00000000000000000000A5 /* QuickControlsView.swift in Sources */,
+				CC00000000000000000000A7 /* EqualizerPresets.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -12,6 +12,13 @@ on:
     - master
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: cross-platform-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
@@ -33,9 +40,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       with:
         submodules: true
+        persist-credentials: false
 
     - name: Download Packages
       run: ${{ matrix.script }}
@@ -53,15 +61,19 @@ jobs:
       # Note the current convention is to use the -S and -B options here to specify source
       # and build directories, but this is only available with CMake 3.13 and higher.
       # The CMake binaries on the Github Actions machines are (as of this writing) 3.12
-      run: cmake .. -DCMAKE_BUILD_TYPE=$BUILD_TYPE
+      run: cmake .. -DCMAKE_BUILD_TYPE=$BUILD_TYPE -DSONYBRIDGE_BUILD_PROTOCOL_TESTS=ON
 
     - name: Build
       working-directory: ${{github.workspace}}/Client/build
       shell: bash
       # Execute the build.  You can specify a specific target with "--target <NAME>"
       run: cmake --build . --config $BUILD_TYPE
+    - name: Native protocol and write-readback tests
+      shell: bash
+      run: ctest --test-dir Client/build -C "$BUILD_TYPE" --output-on-failure
+
     - name: Upload a Build Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         # Artifact name
         name: ${{ matrix.artifact_name }}

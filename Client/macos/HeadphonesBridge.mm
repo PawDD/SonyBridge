@@ -7,17 +7,26 @@
 #import <IOBluetoothUI/IOBluetoothUI.h>
 #import <IOBluetooth/IOBluetooth.h>
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include "MacOSBluetoothConnector.h"
 #include "BluetoothWrapper.h"
 #include "Headphones.h"
+#include "../WaitForDeviceState.h"
 // RecoverableException comes in transitively via BluetoothWrapper.h -> IBluetoothConnector.h -> Exceptions.h.
 // (Exceptions.h isn't a project file reference, so it can't be #included directly from this directory.)
 
 // The dynamic poll fires every 2s; re-read the battery every 15th tick (~30s), which is far more often
 // than a headphone battery meaningfully moves but cheap enough not to crowd out the ambient/NC polling.
 static const unsigned kBatteryPollEveryNTicks = 15;
+
+// Apply the new verification policy only to XM4C. Existing models retain their
+// established write behaviour; reads stay on the serial command queue.
+template <typename ReadAndMatch>
+static void SHCWaitForAppliedState(Headphones* headphones, ReadAndMatch readAndMatch, const char* error) {
+    if (headphones->requiresWriteReadback()) waitForDeviceState(readAndMatch, error);
+}
 
 @interface SHCPairedDevice ()
 @property (nonatomic, copy, readwrite) NSString *name;
@@ -26,6 +35,14 @@ static const unsigned kBatteryPollEveryNTicks = 15;
 @property (nonatomic, readwrite) NSInteger classOfDevice;
 @property (nonatomic, readwrite) BOOL playback;
 @property (nonatomic, readwrite) BOOL isThisMac;
+@end
+
+@interface SHCEqualizerPreset ()
+@property (nonatomic, readwrite) NSInteger code;
+@property (nonatomic, copy, readwrite) NSString *name;
+@end
+
+@implementation SHCEqualizerPreset
 @end
 
 @implementation SHCPairedDevice
@@ -128,6 +145,18 @@ static NSString *SHCNormalizedAddress(NSString *address) {
     return _hp && _hp->hasEqualizer();
 }
 
+- (NSArray<SHCEqualizerPreset *> *)equalizerPresets {
+    if (!_hp) return @[];
+    NSMutableArray<SHCEqualizerPreset *> *presets = [NSMutableArray array];
+    for (const auto &entry : _hp->getEqualizerPresets()) {
+        SHCEqualizerPreset *preset = [SHCEqualizerPreset new];
+        preset.code = entry.code;
+        preset.name = [[NSString alloc] initWithBytes:entry.name.data() length:entry.name.size() encoding:NSUTF8StringEncoding] ?: @"";
+        [presets addObject:preset];
+    }
+    return presets;
+}
+
 - (NSInteger)clearBass {
     return _hp ? _hp->getClearBass() : 0;
 }
@@ -158,8 +187,48 @@ static NSString *SHCNormalizedAddress(NSString *address) {
 - (nullable NSString *)firmware { return _hp ? @(_hp->getFirmware().c_str()) : nil; }
 - (BOOL)hasCodec { return _hp && _hp->hasCodec(); }
 - (nullable NSString *)codec { return _hp ? @(_hp->getCodec().c_str()) : nil; }
+- (BOOL)hasWindNoiseReduction { return _hp && _hp->hasWindNoiseReduction(); }
+- (BOOL)windNoiseReduction { return _hp && _hp->getWindNoiseReduction(); }
+- (BOOL)hasConnectionQuality { return _hp && _hp->hasConnectionQuality(); }
+- (NSInteger)connectionQuality { return _hp ? _hp->getConnectionQuality() : 0; }
+- (void)refreshConnectionInfoWithCompletion:(void (^)(BOOL, NSString * _Nullable))completion {
+    auto hp = _hp;
+    if (!hp || !self.connected) { completion(NO, @"Not connected."); return; }
+    dispatch_async(_cmdQueue, ^{
+        BOOL ok = YES; NSString *error = nil;
+        try { hp->requestConnectionQuality(); }
+        catch (const std::exception &exc) { ok = NO; error = @(exc.what()); }
+        try { hp->requestCodec(); }
+        catch (const std::exception &exc) { ok = NO; if (!error) error = @(exc.what()); }
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
+    });
+}
 - (BOOL)hasSpeakToChat { return _hp && _hp->hasSpeakToChat(); }
 - (BOOL)speakToChat { return _hp && _hp->getSpeakToChat(); }
+- (BOOL)hasSpeakToChatTiming { return _hp && _hp->hasSpeakToChatTiming(); }
+- (NSInteger)speakToChatTimeout { return _hp ? _hp->getSpeakToChatTimeout() : 0; }
+- (NSArray<NSNumber *> *)speakToChatTimeoutSeconds {
+    NSMutableArray<NSNumber *> *times = [NSMutableArray array];
+    if (_hp) for (int seconds : _hp->getSpeakToChatTimeoutSeconds()) [times addObject:@(seconds)];
+    return times;
+}
+- (void)setSpeakToChatTimeout:(NSInteger)option completion:(void (^)(BOOL, NSString * _Nullable))completion {
+    auto hp = _hp;
+    if (!hp || !self.connected || !hp->hasSpeakToChatTiming()) {
+        completion(NO, @"Speak-to-Chat timing is unavailable."); return;
+    }
+    dispatch_async(_cmdQueue, ^{
+        BOOL ok = YES; NSString *error = nil;
+        try {
+            hp->setSpeakToChatTimeout((int)option);
+            waitForDeviceState([&] {
+                hp->requestSpeakToChatTiming();
+                return hp->getSpeakToChatTimeout() == option;
+            }, "The headphones did not apply the Speak-to-Chat timeout.");
+        } catch (const std::exception &exc) { ok = NO; error = @(exc.what()); }
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
+    });
+}
 - (BOOL)hasAdaptiveVolume { return _hp && _hp->hasAdaptiveVolume(); }
 - (BOOL)adaptiveVolume { return _hp && _hp->getAdaptiveVolume(); }
 
@@ -293,7 +362,7 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
         }
         try { hp->requestAmbientState(); } catch (std::exception &exc) {}
         try { hp->requestBattery(); } catch (std::exception &exc) {}
-        try { hp->requestEqualizer(); } catch (std::exception &exc) {}
+        try { hp->requestEqualizer(); hp->requestEqualizerPresets(); } catch (std::exception &exc) {}
         try { hp->requestDsee(); } catch (std::exception &exc) {}
         dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
 
@@ -421,7 +490,12 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         NSString *error = nil;
         BOOL ok = YES;
         try {
-            hp->setEqualizerPreset(static_cast<EQ_PRESET>((unsigned char)preset));
+            auto expected = static_cast<EQ_PRESET>((unsigned char)preset);
+            hp->setEqualizerPreset(expected);
+            SHCWaitForAppliedState(hp.get(), [&] {
+                hp->requestEqualizer();
+                return hp->getEqualizerPreset() == expected;
+            }, "The headphones did not apply this EQ preset.");
         } catch (std::exception &exc) {
             ok = NO;
             error = @(exc.what());
@@ -432,7 +506,7 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     });
 }
 
-- (void)setCustomEqualizerBass:(NSInteger)bass bands:(NSArray<NSNumber *> *)bands completion:(void (^)(BOOL, NSString * _Nullable))completion {
+- (void)setCustomEqualizerBass:(NSInteger)bass bands:(NSArray<NSNumber *> *)bands preset:(NSInteger)preset completion:(void (^)(BOOL, NSString * _Nullable))completion {
     if (!_hp || !self.connected || !_hp->hasEqualizer()) {
         completion(NO, @"Equalizer control isn't supported on this device yet.");
         return;
@@ -444,7 +518,18 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     dispatch_async(_cmdQueue, ^{
         NSString *error = nil; BOOL ok = YES;
         try {
-            hp->setEqualizerCustom(cbass, cbands);
+            hp->setEqualizerCustom(cbass, cbands, static_cast<EQ_PRESET>(preset));
+            SHCWaitForAppliedState(hp.get(), [&] {
+                hp->requestEqualizer();
+                bool matches = hp->getEqualizerPreset() == static_cast<EQ_PRESET>(preset);
+                if (!hp->isTenBandEqualizer()) matches = matches && hp->getClearBass() == std::clamp(cbass, -10, 10);
+                for (int i = 0; i < hp->getEqualizerBandCount(); ++i) {
+                    int expected = i < (int)cbands.size() ? cbands[i] : 0;
+                    expected = hp->isTenBandEqualizer() ? std::clamp(expected, 0, 12) : std::clamp(expected, -10, 10);
+                    matches = matches && hp->getEqualizerBand(i) == expected;
+                }
+                return matches;
+            }, "The headphones did not apply the custom EQ curve.");
         } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
     });
@@ -460,6 +545,10 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         NSString *error = nil; BOOL ok = YES;
         try {
             hp->setDsee(enabled);
+            SHCWaitForAppliedState(hp.get(), [&] {
+                hp->requestDsee();
+                return hp->getDsee() == (bool)enabled;
+            }, "The headphones did not apply the DSEE setting.");
         } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
     });
@@ -468,6 +557,7 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
 - (void)applyMode:(SHCAmbientMode)mode
             level:(NSInteger)level
        focusVoice:(BOOL)focusVoice
+    windReduction:(BOOL)windReduction
        completion:(void (^)(BOOL, NSString * _Nullable))completion {
     if (!_hp || !self.connected) {
         completion(NO, @"Not connected.");
@@ -479,9 +569,14 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         NSString *error = nil;
         BOOL ok = YES;
         try {
+            if (hp->hasWindNoiseReduction()) hp->setWindNoiseReduction(windReduction);
             switch (mode) {
                 case SHCAmbientModeOff:
                     hp->setAmbientSoundControl(false);
+                    if (hp->requiresWriteReadback()) {
+                        hp->setAsmLevel(0);
+                        hp->setFocusOnVoice(false);
+                    }
                     break;
                 case SHCAmbientModeNoiseCanceling:
                     hp->setAmbientSoundControl(true);
@@ -495,6 +590,20 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
                     break;
             }
             if (hp->isChanged()) hp->setChanges();
+            SHCWaitForAppliedState(hp.get(), [&] {
+                hp->requestAmbientState();
+                bool matches = hp->getAmbientSoundControl() == (mode != SHCAmbientModeOff);
+                if (mode != SHCAmbientModeOff) {
+                    matches = matches && (hp->getAsmLevel() > 0) == (mode == SHCAmbientModeAmbientSound);
+                    if (mode == SHCAmbientModeNoiseCanceling && hp->hasWindNoiseReduction())
+                        matches = matches && hp->getWindNoiseReduction() == (bool)windReduction;
+                    if (mode == SHCAmbientModeAmbientSound) {
+                        matches = matches && hp->getAsmLevel() == MAX(level, 1);
+                        if (hp->requiresWriteReadback()) matches = matches && hp->getFocusOnVoice() == (bool)focusVoice;
+                    }
+                }
+                return matches;
+            }, "The headphones did not apply the ANC/Ambient setting.");
         } catch (RecoverableException &exc) {
             ok = NO;
             error = @(exc.what());
@@ -516,7 +625,13 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     auto hp = _hp;
     dispatch_async(_cmdQueue, ^{
         NSString *error = nil; BOOL ok = YES;
-        try { hp->setAutoPowerOff((int)index); } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
+        try {
+            hp->setAutoPowerOff((int)index);
+            SHCWaitForAppliedState(hp.get(), [&] {
+                hp->requestAutoPowerOff();
+                return hp->getAutoPowerOff() == index;
+            }, "The headphones did not apply the auto power-off setting.");
+        } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
     });
 }
@@ -526,7 +641,13 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     auto hp = _hp;
     dispatch_async(_cmdQueue, ^{
         NSString *error = nil; BOOL ok = YES;
-        try { hp->setSpeakToChat(enabled); } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
+        try {
+            hp->setSpeakToChat(enabled);
+            SHCWaitForAppliedState(hp.get(), [&] {
+                hp->requestSpeakToChat();
+                return hp->getSpeakToChat() == (bool)enabled;
+            }, "The headphones did not apply the Speak-to-Chat setting.");
+        } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
         dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
     });
 }
