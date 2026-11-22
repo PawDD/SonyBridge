@@ -1,0 +1,18 @@
+SonyBridge XM4C — macOS preview
+macOS 12 or later · Apple Silicon and Intel
+
+1. Drag SonyBridge.app onto Applications.
+2. Eject this disk image, then open SonyBridge from Applications.
+3. This preview is ad-hoc signed, not Apple-notarized. If macOS blocks
+   the app, first try opening it, then use System Settings > Privacy &
+   Security > Open Anyway, only if you trust the source.
+4. Allow Bluetooth access when prompted. Connect your headphones in
+   macOS Bluetooth settings, then choose Connect in SonyBridge.
+
+No Terminal commands or Homebrew are required.
+Existing settings may survive removal of an earlier installation.
+
+Source and known limitations: https://github.com/PawDD/SonyBridge
+Apple installation guidance: https://support.apple.com/en-us/102445
+Build identification and licenses are inside:
+SonyBridge.app/Contents/Resources/Notices
