@@ -6,6 +6,14 @@ An unofficial fork of [AmitRajput-Dev/SonyBridge](https://github.com/AmitRajput-
 [![Linux & Windows](https://github.com/PawDD/SonyBridge/actions/workflows/cmake.yml/badge.svg)](https://github.com/PawDD/SonyBridge/actions/workflows/cmake.yml)
 [![License: MIT](https://img.shields.io/badge/code-MIT-green)](LICENSE)
 
+## Why I created this fork
+
+I use the **Sony WH-1000XM4C** and wanted to control it from my Mac, but the upstream version I tested did not yet support this new model's control layouts. I created this fork to add the support I needed and share it with other XM4C owners, building on SonyBridge's existing work.
+
+**WH-1000XM4C is a separate model introduced in 2026, not another name for the original WH-1000XM4 from 2020.** Sony describes the XM4C as a refresh based on the XM4's established design, with updated sound tuning and a 10-band equalizer. Its familiar appearance does not mean desktop software can reuse the original XM4's protocol assumptions unchanged. See Sony's [XM4C announcement (September 2026)](https://www.sony.co.uk/presscentre/sony-introduces-wh-1000xm4c-wireless-noise-cancelling-headphones-and-updates-popular-mid-and-entry-level-wireless-headphones-with-wh-ch730n-and-wh-ch530) and [original XM4 announcement (August 2020)](https://www.sony.com.hk/press/pdf/20200807_e.pdf).
+
+Created and maintained by [**@PawDD**](https://github.com/PawDD). The changes and validation below concern this fork; upstream authorship and credits are retained.
+
 ## What this fork changes
 
 - Capability-gated XM4C ANC/Ambient commands, including the separate Noise Canceling / Wind Noise Reduction selector.
@@ -66,7 +74,7 @@ This fork is based on upstream v0.4.0 at `d0ecd561ebf6f1cb87ffbf29528107b2221724
 - [Plutoberth/SonyHeadphonesClient](https://github.com/Plutoberth/SonyHeadphonesClient), its authors and contributors — the original client and protocol foundation.
 - [semvis123](https://github.com/semvis123) — original macOS port.
 - [Gadgetbridge](https://codeberg.org/Freeyourgadget/Gadgetbridge), [BudsLink](https://github.com/maniacx/BudsLink), [Sony Device Center](https://github.com/marconvcm/sony-device-center) and the public [libmdr protocol reference](https://github.com/mos9527/SonyHeadphonesClient) — protocol references and device reports. Specific references are listed in the technical notes.
-- PawDD — this fork's XM4C implementation, tests and macOS UI changes.
+- [@PawDD](https://github.com/PawDD) — this fork's XM4C implementation, tests and macOS UI changes.
 
 The code is under the [MIT license](LICENSE); upstream copyright and permission notices are retained. Bundled dependencies retain their own license notices, including Dear ImGui and the Cascadia Code font.
 
