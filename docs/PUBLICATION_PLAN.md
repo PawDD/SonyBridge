@@ -24,4 +24,13 @@ Keep the original MIT license, copyright notices, dependency notices and upstrea
 
 Run the offline regression suite and full source build in CI, including both macOS architectures. Use [the technical notes](WH-1000XM4C.md) for hardware evidence and outstanding tests. A stable binary release needs a current-commit hardware smoke test; do not package a local diagnostic application as a public release.
 
-CI uploads only selected build artifacts. It does not automatically create a GitHub release or publish a website. Fork CI artifacts can be visible to repository readers; they are not private merely because they came from Actions. Any future distributable must be rebuilt from the reviewed revision and identified honestly as development, prerelease or stable. Ad-hoc signing is not Apple notarization.
+CI uploads only selected build artifacts. It does not automatically create a GitHub release or publish a website. Fork CI artifacts can be visible to repository readers; they are not private merely because they came from Actions. Distributables must be built from the reviewed revision using `sh Client/macos/build-release.sh`. Release naming does not expand the hardware validation recorded in the technical notes. Ad-hoc signing is not Apple notarization.
+
+## Current installer procedure
+
+1. Start from a clean checkout of the reviewed commit, select full Xcode, and run `sh Client/tests/run-macos.sh` followed by `sh Client/macos/build-release.sh`. CI uses the same commands on `macos-15-intel` and builds both arm64 and x86_64.
+2. Take only `SonyBridge XM4C.dmg` and its checksum from `dist/<full-commit-sha>/` (or the matching successful CI artifact). The script builds application code, storyboard and image catalog together from source; installed apps and previously compiled resources are not inputs.
+3. Verify the CI run's source SHA, the packaged `Notices/BUILD.txt`, and the SHA-256 before uploading. Packaging already checks signatures, entitlements, both architectures, executable integrity and the mounted image.
+4. Update the existing `xm4c-macos` release and its tag to the reviewed commit. Replace its two assets together; when GitHub normalizes spaces to dots in asset names, make the checksum filename entry match the downloaded DMG name. Retain the old package locally for rollback. Do not create a parallel preview release.
+
+The application version remains 0.4.0 for documentation, image or packaging maintenance. Distinct source commits are recorded in `BUILD.txt`; this does not promise byte-identical DMGs between toolchains or signing operations. Changes to application behaviour require a separate versioning decision.

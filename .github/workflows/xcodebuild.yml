@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   tests:
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -26,29 +26,18 @@ jobs:
 
   build:
     needs: tests
-    runs-on: macos-latest
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: Build universal macOS application from source
-        run: |
-          xcodebuild -project Client/macos/SonyHeadphonesClient.xcodeproj \
-            -scheme SonyHeadphonesClient -configuration Release \
-            -destination 'generic/platform=macOS' -derivedDataPath build/macOS \
-            -hideShellScriptEnvironment \
-            ARCHS='arm64 x86_64' ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM='' build
-      - name: Package and verify drag-to-Applications installer
-        run: |
-          python3 Client/macos/package-dmg.py \
-            --app build/macOS/Build/Products/Release/SonyHeadphonesClient.app \
-            --output-dir dist
+      - name: Build and verify universal installer from current source
+        run: sh Client/macos/build-release.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SonyBridge-XM4C-macOS
           if-no-files-found: error
           retention-days: 14
           path: |
-            dist/SonyBridge XM4C.dmg
-            dist/SonyBridge XM4C.dmg.sha256
+            dist/*/SonyBridge XM4C.dmg
+            dist/*/SonyBridge XM4C.dmg.sha256

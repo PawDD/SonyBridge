@@ -122,7 +122,7 @@ def main():
         ]:
             shutil.copyfile(ROOT / source, notices / name)
         (notices / "BUILD.txt").write_text(
-            "SonyBridge XM4C — macOS preview\n"
+            "SonyBridge XM4C — macOS\n"
             f"Source: {SOURCE_URL}\nCommit: {revision}\n"
             "Packaging adds licenses and replaces the ad-hoc signature without\n"
             "debugger entitlement. Application code is unchanged from the input build.\n"
@@ -149,7 +149,7 @@ def main():
         # A normal browser download applies the system's quarantine metadata.
         temporary_dmg = work / PACKAGE_NAME
         run(
-            "hdiutil", "create", "-volname", "SonyBridge XM4C Preview",
+            "hdiutil", "create", "-volname", "SonyBridge XM4C",
             "-srcfolder", stage, "-format", "UDZO", "-fs", "HFS+", temporary_dmg,
         )
         verify_image(temporary_dmg, executable_hash)

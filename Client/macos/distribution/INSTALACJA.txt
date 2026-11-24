@@ -1,4 +1,4 @@
-SonyBridge XM4C — wersja testowa macOS
+SonyBridge XM4C — macOS
 macOS 12 lub nowszy · Apple Silicon i Intel
 
 1. Przeciągnij SonyBridge.app na skrót Applications (Aplikacje).

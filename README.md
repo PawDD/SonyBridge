@@ -35,16 +35,16 @@ The maintainer has tested the application locally and confirmed installation fro
 
 ## Download and install on macOS
 
-Download **SonyBridge XM4C.dmg** from [this fork's releases](https://github.com/PawDD/SonyBridge/releases). Use the newest macOS preview. The filename stays simple; the source revision is recorded inside the app. The upstream Homebrew cask and upstream downloads do not contain this fork's changes.
+Download **SonyBridge XM4C.dmg** from [this fork's releases](https://github.com/PawDD/SonyBridge/releases). Use the current macOS release. The filename stays simple; the source revision is recorded inside the app. The upstream Homebrew cask and upstream downloads do not contain this fork's changes.
 
 1. Open the DMG and drag **SonyBridge.app** onto **Applications**.
 2. Eject the disk image, then launch SonyBridge from Applications.
-3. This preview is ad-hoc signed, **not Apple-notarized**. If macOS blocks it, first attempt to launch it, then follow [Apple's instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security → Open Anyway**, if you trust the source.
+3. This application is ad-hoc signed, **not Apple-notarized**. If macOS blocks it, first attempt to launch it, then follow [Apple's instructions](https://support.apple.com/en-us/102445) in **System Settings → Privacy & Security → Open Anyway**, if you trust the source.
 4. Allow Bluetooth access when prompted. Connect your headphones in macOS Bluetooth settings, then choose **Connect** in SonyBridge.
 
-No Terminal commands or Homebrew are needed. Existing preferences may survive removal of an earlier app. This is a preview, not a stable release.
+No Terminal commands or Homebrew are needed. Existing preferences may survive removal of an earlier app. Hardware validation is limited to the configurations and features documented above.
 
-For builds newer than the downloadable preview, [macOS Actions](https://github.com/PawDD/SonyBridge/actions/workflows/xcodebuild.yml) also supplies the DMG and SHA-256 checksum as CI artifacts.
+For builds newer than the downloadable release, [macOS Actions](https://github.com/PawDD/SonyBridge/actions/workflows/xcodebuild.yml) also supplies the DMG and SHA-256 checksum as CI artifacts.
 
 ## Build and test
 
@@ -61,7 +61,7 @@ sh Client/tests/run-macos.sh
 open Client/macos/SonyHeadphonesClient.xcodeproj
 ```
 
-Select the `SonyHeadphonesClient` scheme and build/run. CI builds a universal app for Apple Silicon and Intel, then runs `Client/macos/package-dmg.py` to create **SonyBridge XM4C.dmg** and its SHA-256 checksum. The installer includes license notices and instructions in English and Polish. Packaging checks both architectures, removes debugger entitlement from its ad-hoc signature, verifies unchanged executable code/data and checks the mounted DMG. It does not change the application version. CI does not automatically publish a release.
+Select the `SonyHeadphonesClient` scheme and build/run. To build and package the current source revision using the same procedure as CI, run `sh Client/macos/build-release.sh` from a clean checkout with full Xcode selected. CI builds a universal app for Apple Silicon and Intel, then runs `Client/macos/package-dmg.py` to create **SonyBridge XM4C.dmg** and its SHA-256 checksum. The installer includes license notices and instructions in English and Polish. Packaging checks both architectures, removes debugger entitlement from its ad-hoc signature, verifies unchanged executable code/data and checks the mounted DMG. It does not change the application version. CI does not automatically publish a release.
 
 ### Windows / Linux
 
