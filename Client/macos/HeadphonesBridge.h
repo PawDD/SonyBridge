@@ -32,6 +32,7 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 @interface HeadphonesBridge : NSObject
 
 @property (nonatomic, readonly) BOOL connected;
+@property (nonatomic, readonly) BOOL systemBluetoothConnected;
 @property (nonatomic, copy, readonly, nullable) NSString *deviceName;
 @property (nonatomic, copy, readonly, nullable) NSString *deviceMac;
 @property (nonatomic, copy, readonly, nullable) NSString *protocolVersionString; // "v1" / "v2"
@@ -91,6 +92,8 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 @property (nonatomic, readonly) BOOL hasPlaybackPinState;
 @property (nonatomic, readonly) BOOL playbackPinned;
 @property (nonatomic, readonly) BOOL hasMultipointSetting;
+@property (nonatomic, readonly) BOOL canSetMultipoint;
+@property (nonatomic, readonly) BOOL multipointRequiresReconnect;
 @property (nonatomic, readonly) BOOL multipointEnabled;
 @property (nonatomic, copy, readonly) NSString *multipointDiagnostics; // hex log of the last multipoint reads
 
@@ -98,6 +101,8 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 // completion is called on the main thread.
 - (void)scanAndConnectWithCompletion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 
+// Reopens only the explicitly selected headset after its multipoint restart; drains old commands first.
+- (void)reconnectToAddress:(NSString *)address completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 - (void)disconnect;
 
 // Pushes the desired ambient/NC state to the device on a background thread; completion on main thread.

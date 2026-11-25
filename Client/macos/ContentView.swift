@@ -20,7 +20,7 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             if model.connected {
-                connectedView
+                connectedView.disabled(model.multipointBusy)
             } else {
                 disconnectedView
             }
@@ -40,9 +40,16 @@ struct ContentView: View {
             Image(systemName: "headphones")
                 .font(.system(size: 64, weight: .thin))
                 .foregroundColor(palette.secondary)
-            Text("No headphones connected")
+            Text(model.connecting && model.multipointBusy ? "Restarting headset connection…" : "SonyBridge is disconnected")
                 .font(.system(size: 15, weight: .medium))
                 .foregroundColor(palette.secondary)
+            if let notice = model.connectionNotice {
+                Text(notice)
+                    .font(.system(size: 12))
+                    .foregroundColor(palette.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
             if let error = model.errorMessage {
                 Text(error)
                     .font(.system(size: 12))
@@ -98,17 +105,17 @@ struct ContentView: View {
 
     @ViewBuilder
     private var secondaryCards: some View {
-        if model.multipointLoading || model.hasPairedDevices || model.hasPlaybackPinState {
-            devicesCard
-        }
         if model.supportsEqualizer {
             equalizerCard
         }
         if model.supportsDsee {
             dseeCard
         }
-        if model.hasConnectionQuality || model.hasAdaptiveVolume || model.hasSpeakToChat || model.hasAutoPowerOff || model.hasMultipointSetting {
+        if model.hasConnectionQuality || model.hasAdaptiveVolume || model.hasSpeakToChat || model.hasAutoPowerOff {
             settingsCard
+        }
+        if model.connected && (model.protocolVersion == "v2" || model.hasPairedDevices || model.hasPlaybackPinState) {
+            devicesCard
         }
         if let error = model.errorMessage {
             Text(error)
@@ -345,10 +352,6 @@ struct ContentView: View {
                     }
                 }
             }
-            if model.hasMultipointSetting {
-                settingToggle("Connect to 2 devices", "Stay paired to two devices at once",
-                              on: model.multipointEnabled) { model.setMultipoint($0) }
-            }
             if model.hasAutoPowerOff {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -380,11 +383,17 @@ struct ContentView: View {
         }
     }
 
-    // Multipoint device list. Read-only for now: nothing here sends a command that changes the headset.
+    // Device names and slots come from the headset; switching/fixing requires an explicit action.
     private var devicesCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                cardTitle("Devices")
+                if model.hasMultipointSetting {
+                    settingToggle("Connect to 2 devices", "Use two Bluetooth devices at once",
+                                  on: model.multipointEnabled) { model.setMultipoint($0) }
+                        .disabled(model.multipointBusy || !model.canSetMultipoint)
+                } else {
+                    cardTitle("Connect to 2 devices")
+                }
                 Spacer()
                 if model.multipointLoading || model.refreshingMultipoint || model.multipointBusy {
                     ProgressView()
@@ -399,58 +408,72 @@ struct ContentView: View {
                     .buttonStyle(PlainButtonStyle())
                 }
             }
-            if model.multipointLoading {
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                        .frame(width: 18, height: 18)
-                    Text("Reading devices from the headset…")
+            if !model.hasMultipointSetting || model.multipointEnabled {
+                if model.multipointLoading {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .frame(width: 18, height: 18)
+                        Text("Reading devices from the headset…")
+                            .font(.system(size: 12))
+                            .foregroundColor(palette.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 6)
+                }
+                if model.hasPlaybackPinState {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Playback device").font(.system(size: 13, weight: .medium)).foregroundColor(palette.primary)
+                            Text(model.playbackPinned ? "Fixed" : "Switches automatically")
+                                .font(.system(size: 11)).foregroundColor(palette.secondary)
+                        }
+                        Spacer()
+                        CapsuleButton(model.playbackPinned ? "Unfix" : "Fix") {
+                            model.setPlaybackPinned(!model.playbackPinned)
+                        }
+                        .disabled(model.multipointBusy)
+                    }
+                }
+                if model.hasPairedDevices {
+                    ForEach(1...2, id: \.self) { slot in
+                        if let device = model.pairedDevices.first(where: { $0.slot == slot }) {
+                            deviceRow(device)
+                        } else {
+                            emptyDeviceSlot(slot)
+                        }
+                    }
+                } else if !model.multipointLoading {
+                    Text("Device list unavailable. This does not mean Bluetooth audio is disconnected.")
                         .font(.system(size: 12))
                         .foregroundColor(palette.secondary)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 6)
-            }
-            if model.hasPlaybackPinState {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Playback device").font(.system(size: 13, weight: .medium)).foregroundColor(palette.primary)
-                        Text(model.playbackPinned ? "Fixed" : "Switches automatically")
-                            .font(.system(size: 11)).foregroundColor(palette.secondary)
-                    }
-                    Spacer()
-                    CapsuleButton(model.playbackPinned ? "Unfix" : "Fix") {
-                        model.setPlaybackPinned(!model.playbackPinned)
-                    }
-                    .disabled(model.multipointBusy)
+                if !model.multipointLoading {
+                    devicesFooter
                 }
             }
-            if model.hasPairedDevices {
-                let connected = model.pairedDevices.filter { $0.connected }.sorted { $0.slot < $1.slot }
-                let paired = model.pairedDevices.filter { !$0.connected }
-                if !connected.isEmpty {
-                    sectionLabel("Connected")
-                    ForEach(connected) { deviceRow($0) }
-                }
-                if !paired.isEmpty {
-                    sectionLabel("Paired")
-                    ForEach(paired) { deviceRow($0) }
-                }
-            } else if !model.multipointLoading {
-                Text("This headset didn't return a device list.")
-                    .font(.system(size: 12))
-                    .foregroundColor(palette.secondary)
-            }
-            if !model.multipointLoading {
-                devicesFooter
-            }
+            Text(model.hasMultipointSetting && !model.canSetMultipoint
+                 ? "This multipoint setting layout is not supported for changes."
+                 : (model.multipointRequiresReconnect
+                    ? "Changing this setting restarts the headset connection. SonyBridge reconnects automatically."
+                    : "Changing this setting may restart the headset connection."))
+                .font(.system(size: 11))
+                .foregroundColor(palette.secondary)
         }
+        .animation(.easeInOut(duration: 0.2), value: model.multipointEnabled)
         .themedCard()
     }
 
     private var devicesFooter: some View {
         VStack(alignment: .leading, spacing: 14) {
             Divider().background(palette.cardStroke)
+            Text(model.deviceName.uppercased().contains("WH-1000XM4C")
+                 ? "WH-1000XM4C supports one active control app at a time. Release control here before opening Sound Connect; Bluetooth audio stays connected."
+                 : "Release control here before using the phone app; Bluetooth audio stays connected.")
+                .font(.system(size: 11))
+                .foregroundColor(palette.secondary)
+            CapsuleButton("Release control to phone") { model.releaseControlToPhone() }
+                .disabled(model.multipointBusy)
             HStack {
                 Text(model.multipointBusy ? "Sending…" : "Switching and fixing are experimental")
                     .font(.system(size: 11))
@@ -474,8 +497,29 @@ struct ContentView: View {
             .padding(.top, 2)
     }
 
+    private func emptyDeviceSlot(_ slot: Int) -> some View {
+        HStack(spacing: 12) {
+            Text("\(slot).")
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 18, alignment: .trailing)
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 15))
+                .frame(width: 22)
+            Text("Not connected")
+                .font(.system(size: 13))
+            Spacer()
+        }
+        .foregroundColor(palette.secondary)
+    }
+
     private func deviceRow(_ device: PairedDeviceInfo) -> some View {
         HStack(spacing: 12) {
+            if device.connected {
+                Text("\(device.slot).")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(palette.secondary)
+                    .frame(width: 18, alignment: .trailing)
+            }
             Image(systemName: deviceSymbol(device.classOfDevice))
                 .font(.system(size: 15))
                 .foregroundColor(device.connected ? palette.primary : palette.secondary)

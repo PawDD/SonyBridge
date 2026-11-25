@@ -42,6 +42,9 @@ public:
 	virtual int recv(char* buf, size_t length) noexcept(false) = 0;
 	virtual void connect(const std::string& addrStr) noexcept(false) = 0;
 	
+	// Optional thread-safe cancellation hook: wake a blocked recv before disconnect takes the I/O lock.
+	virtual void cancelPendingReads() noexcept {}
+
 	//This function should not block.
 	virtual void disconnect() noexcept = 0;
 	

@@ -54,12 +54,14 @@ static NSString *SHCNormalizedAddress(NSString *address) {
 }
 
 @implementation HeadphonesBridge {
+    MacOSBluetoothConnector *_macConnector; // owned by _bt
     std::unique_ptr<BluetoothWrapper> _bt;
     // Queued operations retain the current device state so disconnecting cannot invalidate a raw pointer
     // while a Bluetooth read or write is still completing.
     std::shared_ptr<Headphones> _hp;
     NSString *_deviceName;
     NSString *_deviceMac;
+    NSString *_lastMultipointWriteDiagnostics;
     std::atomic_bool _initialized;
     // Only touched inside blocks on _cmdQueue, which is serial.
     unsigned _dynamicTick;
@@ -70,7 +72,9 @@ static NSString *SHCNormalizedAddress(NSString *address) {
 
 - (instancetype)init {
     if ((self = [super init])) {
-        _bt = std::make_unique<BluetoothWrapper>(std::make_unique<MacOSBluetoothConnector>());
+        auto connector = std::make_unique<MacOSBluetoothConnector>();
+        _macConnector = connector.get();
+        _bt = std::make_unique<BluetoothWrapper>(std::move(connector));
         _initialized = false;
         _cmdQueue = dispatch_queue_create("com.sonybridge.commands", DISPATCH_QUEUE_SERIAL);
     }
@@ -79,6 +83,11 @@ static NSString *SHCNormalizedAddress(NSString *address) {
 
 - (BOOL)connected {
     return _bt && _bt->isConnected();
+}
+
+- (BOOL)systemBluetoothConnected {
+    if (!_deviceMac.length) return NO;
+    return [[IOBluetoothDevice deviceWithAddressString:_deviceMac] isConnected];
 }
 
 - (nullable NSString *)deviceName {
@@ -236,8 +245,16 @@ static NSString *SHCNormalizedAddress(NSString *address) {
 - (BOOL)hasPlaybackPinState { return _hp && _hp->hasPlaybackPinState(); }
 - (BOOL)playbackPinned { return _hp && _hp->isPlaybackPinned(); }
 - (BOOL)hasMultipointSetting { return _hp && _hp->hasMultipointSetting(); }
+- (BOOL)canSetMultipoint { return _hp && _hp->canSetMultipoint(); }
+- (BOOL)multipointRequiresReconnect { return _hp && _hp->multipointRequiresReconnect(); }
 - (BOOL)multipointEnabled { return _hp && _hp->getMultipointEnabled(); }
-- (NSString *)multipointDiagnostics { return _hp ? @(_hp->getMultipointDiagnostics().c_str()) : @""; }
+- (NSString *)multipointDiagnostics {
+    NSString *current = _hp ? @(_hp->getMultipointDiagnostics().c_str()) : @"";
+    // Keep the loading sentinel empty until a fresh session has a read result.
+    if (!current.length || !_lastMultipointWriteDiagnostics.length) return current;
+    return [NSString stringWithFormat:@"Previous multipoint change (before reconnect):\n%@\nCurrent session:\n%@",
+            _lastMultipointWriteDiagnostics, current];
+}
 
 - (NSArray<SHCPairedDevice *> *)pairedDevices {
     if (!_hp) return @[];
@@ -303,6 +320,22 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
         return;
     }
 
+    [self connectDevice:device completion:completion];
+}
+
+- (void)reconnectToAddress:(NSString *)address completion:(void (^)(BOOL, NSString * _Nullable))completion {
+    // Old operations retain their Headphones object. Let them finish on the closed link before
+    // opening a replacement, so an old poll cannot issue commands in a new pre-init session.
+    dispatch_async(_cmdQueue, ^{
+        dispatch_async(dispatch_get_main_queue(), ^{
+            IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
+            if (!device || !device.isPaired) { completion(NO, @"The selected headset is no longer paired."); return; }
+            [self connectDevice:device completion:completion];
+        });
+    });
+}
+
+- (void)connectDevice:(IOBluetoothDevice *)device completion:(void (^)(BOOL, NSString * _Nullable))completion {
     // A device without an address string would hand std::string a null char* below (undefined
     // behaviour); getConnectedDevices() applies the same guard.
     NSString *address = [device addressString];
@@ -321,14 +354,15 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
     // A real RFCOMM open (SDP + link setup, sometimes with encryption renegotiation) can take a few
     // seconds; pump the run loop until it lands or we give up.
     int timeout = 80;
-    while (!_bt->isConnected() && timeout >= 0) {
+    while (!_bt->isConnected() && _macConnector->running && timeout >= 0) {
         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
         timeout--;
     }
 
     if (!_bt->isConnected()) {
+        int status = _macConnector->channelOpenStatus();
         _bt->disconnect();
-        completion(NO, @"Connection timed out.");
+        completion(NO, [NSString stringWithFormat:@"Could not open the headset control channel (Bluetooth status %d). Another app may be using it. Close the headphone app on Android and try again; check multipoint connections in macOS Bluetooth.", status]);
         return;
     }
 
@@ -340,7 +374,26 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
     // A link the headset dropped on its own never went through -disconnect, so reset here: every new
     // Headphones needs the init handshake (its reply also gates the multipoint reads).
     _initialized = false;
-    completion(YES, nil);
+    // An open audio/control link is not yet a usable Sony session. Do not start polling or
+    // capability probes until the headset has answered the protocol handshake.
+    auto hp = _hp;
+    dispatch_async(_cmdQueue, ^{
+        NSString *error = nil;
+        try { hp->initDevice(); }
+        catch (const std::exception &exc) {
+            error = [NSString stringWithFormat:@"The headset did not complete Sony initialization: %s. Close the headphone app on Android and try again.", exc.what()];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) { completion(NO, @"Connection cancelled."); return; }
+            if (error || !self.connected) {
+                [self disconnect];
+                completion(NO, error ?: @"The headset disconnected during initialization.");
+                return;
+            }
+            self->_initialized = true;
+            completion(YES, nil);
+        });
+    });
 }
 
 - (void)disconnect {
@@ -352,25 +405,21 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
 }
 
 - (void)refreshStatusWithCompletion:(void (^)(void))completion {
-    if (!_hp || !self.connected) { completion(); return; }
+    if (!_hp || !self.connected || !_initialized.load()) { completion(); return; }
     auto hp = _hp;
     dispatch_async(_cmdQueue, ^{
         // Every method chooses its command family from the SDP-confirmed protocol version. This is
         // essential for v1: 0x22 powers off an XM4 but requests battery state on v2.
-        if (!self->_initialized.load()) {
-            try { hp->initDevice(); self->_initialized = true; } catch (std::exception &exc) {}
-        }
+        try { hp->requestMultipoint(); } catch (const std::exception &exc) {}
+        dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
         try { hp->requestAmbientState(); } catch (std::exception &exc) {}
         try { hp->requestBattery(); } catch (std::exception &exc) {}
         try { hp->requestEqualizer(); hp->requestEqualizerPresets(); } catch (std::exception &exc) {}
         try { hp->requestDsee(); } catch (std::exception &exc) {}
         dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
 
-        // ...then the optional-feature probes and the multipoint discovery (its general-settings slot search),
-        // which can each take a couple seconds to time out on a device that doesn't support them. Update the
-        // UI again once they've settled. requestMultipoint() is a no-op on v1.
+        // Optional-feature probes can time out on unsupported devices; publish their results last.
         try { hp->probeCapabilities(); } catch (std::exception &exc) {}
-        try { hp->requestMultipoint(); } catch (std::exception &exc) {}
         dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
     });
 }
@@ -668,7 +717,16 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     dispatch_async(_cmdQueue, ^{
         NSString *error = nil; BOOL ok = YES;
         try { hp->setMultipoint(enabled); } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
+        // XM4C must restart and reconnect before fresh reads; the model owns that one-shot flow.
+        // Other models retain the immediate read-back path.
+        if (ok && self.connected && !hp->multipointRequiresReconnect()) {
+            try { hp->requestMultipoint(); } catch (const std::exception &exc) {}
+        }
+        NSString *attemptDiagnostics = @(hp->getMultipointDiagnostics().c_str());
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_lastMultipointWriteDiagnostics = attemptDiagnostics;
+            completion(ok, error);
+        });
     });
 }
 

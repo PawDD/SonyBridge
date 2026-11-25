@@ -96,19 +96,23 @@ final class HeadphonesModel: ObservableObject {
     // Multipoint ("Connect to 2 devices"). Device-persistent - no app-enforced default; the
     // toggle just mirrors the on-device state.
     @Published var hasMultipointSetting = false
+    @Published var canSetMultipoint = false
+    @Published var multipointRequiresReconnect = false
     @Published var multipointEnabled = false
     @Published var multipointDiagnostics = ""
     @Published var refreshingMultipoint = false
     @Published var multipointBusy = false
 
-    // True from connect until the first multipoint read has finished. Those reads run after the
-    // capability probes, so on a v2 headset this can take several seconds.
+    // True from connect until the first multipoint read has finished. Discovery can take several seconds.
     var multipointLoading: Bool {
         connected && protocolVersion == "v2" && multipointDiagnostics.isEmpty
     }
 
     @Published var errorMessage: String?
+    @Published var connectionNotice: String?
 
+    private var multipointExpectedAfterReconnect: Bool?
+    private var multipointReconnectWork: DispatchWorkItem?
     private var pollTimer: Timer?
     private var dynamicTimer: Timer?
 
@@ -128,9 +132,11 @@ final class HeadphonesModel: ObservableObject {
     private var s2cAutoDisablePending = false
 
     func connect() {
+        guard !connecting, !connected else { return }
         connectionInfoGeneration += 1
         connecting = true
         errorMessage = nil
+        connectionNotice = nil
         // Defer so SwiftUI can render the "Connecting…" state before the modal picker blocks the main thread.
         DispatchQueue.main.async {
             self.bridge.scanAndConnect { ok, error in
@@ -177,6 +183,14 @@ final class HeadphonesModel: ObservableObject {
             self.hasAdaptiveVolume = self.bridge.hasAdaptiveVolume
             self.adaptiveVolume = self.bridge.adaptiveVolume
             self.syncMultipointFromBridge()
+            if let expected = self.multipointExpectedAfterReconnect, !self.multipointDiagnostics.isEmpty {
+                self.multipointExpectedAfterReconnect = nil
+                if !self.hasMultipointSetting {
+                    self.errorMessage = "Reconnected, but the multipoint setting could not be read back."
+                } else if self.multipointEnabled != expected {
+                    self.errorMessage = "The headset did not report the requested multipoint setting after reconnecting."
+                }
+            }
             // Speak-to-Chat capability is only confirmed by the probeCapabilities pass
             // (the second completion), so this stays armed until then and fires at most
             // once per connect. The device stays untouched unless it reports S2C on.
@@ -226,6 +240,8 @@ final class HeadphonesModel: ObservableObject {
         hasPlaybackPinState = bridge.hasPlaybackPinState
         playbackPinned = bridge.playbackPinned
         hasMultipointSetting = bridge.hasMultipointSetting
+        canSetMultipoint = bridge.canSetMultipoint
+        multipointRequiresReconnect = bridge.multipointRequiresReconnect
         multipointEnabled = bridge.multipointEnabled
         multipointDiagnostics = bridge.multipointDiagnostics
     }
@@ -289,9 +305,65 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func setMultipoint(_ on: Bool) {
-        multipointEnabled = on
+        guard connected, canSetMultipoint, !multipointBusy, on != multipointEnabled else { return }
+        let needsReconnect = bridge.multipointRequiresReconnect
+        let address = deviceMac
+        multipointBusy = true
+        stopDynamicPolling()
+        stopWatchingConnection()
         errorMessage = nil
-        bridge.setMultipoint(on) { ok, error in if !ok, let e = error { self.errorMessage = e } }
+        bridge.setMultipoint(on) { ok, error in
+            if needsReconnect {
+                if ok {
+                    self.reconnectAfterMultipointChange(address: address, expected: on)
+                } else {
+                    self.disconnect()
+                    self.errorMessage = "Multipoint change could not be confirmed. The control session was closed and no retry was sent. \(error ?? "Reconnect to inspect the headset state.")"
+                }
+                return
+            }
+            self.multipointBusy = false
+            if self.bridge.connected {
+                self.syncMultipointFromBridge()
+                self.startWatchingConnection()
+                self.startDynamicPolling()
+            } else {
+                self.disconnect()
+            }
+            if !ok {
+                self.errorMessage = "Multipoint change could not be confirmed. No retry was sent. \(error ?? "Reconnect to read the headset state.")"
+            }
+        }
+    }
+
+    private func reconnectAfterMultipointChange(address: String, expected: Bool) {
+        disconnect()
+        connecting = true
+        multipointBusy = true
+        let generation = connectionInfoGeneration
+        // Allow the headset to restart before one reconnect attempt. Never resend the setting
+        // or select a different headset during recovery.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, self.connectionInfoGeneration == generation else { return }
+            self.bridge.reconnect(toAddress: address) { ok, error in
+                guard self.connectionInfoGeneration == generation else { return }
+                self.connecting = false
+                self.multipointBusy = false
+                self.multipointReconnectWork = nil
+                if ok {
+                    self.multipointExpectedAfterReconnect = expected
+                    self.s2cAutoDisablePending = true
+                    self.syncFromBridge()
+                    self.startWatchingConnection()
+                    self.refreshStatus()
+                    self.startDynamicPolling()
+                } else {
+                    self.errorMessage = "The headset did not reconnect after changing multipoint. \(error ?? "Press Connect to try connecting again.")"
+                }
+            }
+        }
+        multipointReconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: work)
     }
 
     // Every @Published setter fires objectWillChange — and a full ContentView body
@@ -416,7 +488,19 @@ final class HeadphonesModel: ObservableObject {
         }
     }
 
+    func releaseControlToPhone() {
+        disconnect()
+        errorMessage = nil
+        connectionNotice = "Control released. You can now open Sound Connect on your phone."
+    }
+
     func disconnect() {
+        connectionNotice = nil
+        multipointReconnectWork?.cancel()
+        multipointReconnectWork = nil
+        multipointExpectedAfterReconnect = nil
+        connecting = false
+        multipointBusy = false
         connectionInfoGeneration += 1
         stopWatchingConnection()
         stopDynamicPolling()
@@ -439,7 +523,16 @@ final class HeadphonesModel: ObservableObject {
             if self.connected && !self.bridge.connected {
                 self.connected = false
                 self.deviceName = ""
-                self.errorMessage = "Headphones disconnected."
+                if self.multipointBusy {
+                    self.connectionNotice = nil
+                    self.errorMessage = "The headset closed the connection while changing multipoint. Press Connect to read its current setting."
+                } else if self.bridge.systemBluetoothConnected {
+                    self.errorMessage = nil
+                    self.connectionNotice = "Control connection closed. To use SonyBridge, close Sound Connect on your phone and reconnect."
+                } else {
+                    self.connectionNotice = nil
+                    self.errorMessage = "The Bluetooth connection closed."
+                }
                 self.stopWatchingConnection()
                 self.stopDynamicPolling()
                 // Release the dead session too, so a reconnect starts clean and the device list doesn't

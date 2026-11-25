@@ -26,11 +26,9 @@ MacOSBluetoothConnector::~MacOSBluetoothConnector()
     delegateCPP->handleChannelClosed();
 }
 
-#ifdef SHC_DEBUG_PROTOCOL
 - (void)rfcommChannelOpenComplete:(IOBluetoothRFCOMMChannel *)rfcommChannel status:(IOReturn)error {
-    fprintf(stderr, "[connect] rfcommChannelOpenComplete status=0x%x\n", error);
+    delegateCPP->handleChannelOpenComplete(error);
 }
-#endif
 
 -(void)rfcommChannelData:(IOBluetoothRFCOMMChannel *)rfcommChannel data:(void *)dataPointer length:(size_t)dataLength
 {
@@ -63,7 +61,11 @@ int MacOSBluetoothConnector::send(char* buf, size_t length)
         channel = (__bridge IOBluetoothRFCOMMChannel*)rfcommchannel;
     }
     if (channel == nil) throw RecoverableException("Bluetooth connection is closed", false);
-    [channel writeSync:(void*)buf length:length];
+    if (!running || !channel.isOpen) throw RecoverableException("Bluetooth control channel is closed", false);
+    IOReturn status = [channel writeSync:(void*)buf length:length];
+    if (status != kIOReturnSuccess) {
+        throw RecoverableException("Bluetooth control write failed (status " + std::to_string(status) + ").", false);
+    }
     return (int)length;
 }
 
@@ -154,13 +156,17 @@ void MacOSBluetoothConnector::connect(const std::string& addrStr){
     if (uthread.joinable()) {
         disconnect();
     }
+    openStatus = kIOReturnSuccess;
     // convert mac address to nsstring
     NSString *addressNSString = [NSString stringWithCString:addrStr.c_str() encoding:[NSString defaultCStringEncoding]];
     // get device based on mac address
     IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:addressNSString];
     // if device is not connected
     if (![device isConnected]) {
-        [device openConnection];
+        IOReturn status = [device openConnection];
+        if (status != kIOReturnSuccess) {
+            throw RecoverableException("Could not connect to the headset (Bluetooth status " + std::to_string(status) + "). Check macOS Bluetooth and available multipoint slots.", false);
+        }
     }
     std::promise<void> connectPromise;
     std::future<void> connectFuture = connectPromise.get_future();
@@ -269,16 +275,26 @@ std::vector<BluetoothDevice> MacOSBluetoothConnector::getConnectedDevices()
     return res;
 }
 
-void MacOSBluetoothConnector::disconnect() noexcept
+void MacOSBluetoothConnector::cancelPendingReads() noexcept
 {
-    // running=false must be stored under disconnectionMutex: connectToMac's untimed wait
-    // would otherwise miss a notify racing its predicate check and never wake.
+    // Store under both waiter mutexes so neither condition variable can lose its wakeup.
     {
-        std::lock_guard<std::mutex> g(disconnectionMutex);
+        std::scoped_lock g(disconnectionMutex, receiveDataMutex);
         running = false;
     }
     disconnectionConditionVariable.notify_all();
     receiveDataConditionVariable.notify_all();
+}
+
+void MacOSBluetoothConnector::handleChannelOpenComplete(int status) noexcept
+{
+    openStatus = status;
+    if (status != kIOReturnSuccess) cancelPendingReads();
+}
+
+void MacOSBluetoothConnector::disconnect() noexcept
+{
+    cancelPendingReads();
     closeConnection();
 
     if (uthread.joinable()) {
@@ -316,14 +332,7 @@ void MacOSBluetoothConnector::handleChannelClosed() noexcept
         if (rfcommchannel) CFRelease(rfcommchannel);
         rfcommchannel = nullptr;
     }
-    // running=false must be stored under disconnectionMutex: connectToMac's untimed wait
-    // would otherwise miss a notify racing its predicate check and never wake.
-    {
-        std::lock_guard<std::mutex> g(disconnectionMutex);
-        running = false;
-    }
-    disconnectionConditionVariable.notify_all();
-    receiveDataConditionVariable.notify_all();
+    cancelPendingReads();
 }
 
 

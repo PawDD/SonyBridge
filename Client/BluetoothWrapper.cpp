@@ -63,6 +63,7 @@ void BluetoothWrapper::disconnect() noexcept
 	this->_seqNumber = 0;
 	this->_leftoverBytes.clear();
 #else
+	this->_connector->cancelPendingReads();
 	std::lock_guard guard(this->_connectorMtx);
 	this->_seqNumber = 0;
 	this->_leftoverBytes.clear();

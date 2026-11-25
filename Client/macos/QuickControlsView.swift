@@ -20,7 +20,7 @@ struct QuickControlsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if model.connected {
-                connectedContent
+                connectedContent.disabled(model.multipointBusy)
             } else {
                 disconnectedContent
             }
@@ -38,9 +38,15 @@ struct QuickControlsView: View {
             Image(systemName: "headphones")
                 .font(.system(size: 34, weight: .thin))
                 .foregroundColor(palette.secondary)
-            Text("No headphones connected")
+            Text(model.connecting && model.multipointBusy ? "Restarting headset connection…" : "SonyBridge is disconnected")
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(palette.secondary)
+            if let notice = model.connectionNotice {
+                Text(notice)
+                    .font(.system(size: 11))
+                    .foregroundColor(palette.secondary)
+                    .multilineTextAlignment(.center)
+            }
             errorText
             ConnectButton(model: model)
         }

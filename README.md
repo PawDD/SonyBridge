@@ -22,6 +22,7 @@ Created and maintained by [**@PawDD**](https://github.com/PawDD). The changes an
 - Fresh read-back after XM4C setting writes: a Bluetooth ACK is not treated as proof that the headphones applied a change.
 - Read-only Bluetooth connection priority and a refreshable headset-reported codec on macOS. This fork does not switch connection priority or force a Mac codec.
 - Consistent DSEE indicators in the window and menu-bar panel, plus full click targets for header buttons.
+- Improved XM4C multipoint switching and reconnection, a two-slot connected-device panel, and separate status messages for app-control and system Bluetooth connections.
 
 Battery, DSEE, auto power-off and the upstream themes and menu-bar controls remain available where supported. [Technical notes and exact validation limits](docs/WH-1000XM4C.md).
 
@@ -29,13 +30,23 @@ Battery, DSEE, auto power-off and the upstream themes and menu-bar controls rema
 
 Development observations concern **WH-1000XM4C firmware 1.1.2 on an Apple Silicon Mac**. Basic ANC/Ambient, a Manual EQ band, DSEE, Speak-to-Chat on/off and auto power-off were exercised during development. Six factory EQ presets were checked in a prior clean CI-built application.
 
-**Custom 1/2 persistence, Speak-to-Chat timeout and Wind Noise Reduction still need a complete hardware retest of the current commit.** Their packet handling has automated regression coverage; that is not a claim of hardware verification. Windows and Linux have build/test coverage, but XM4C hardware behaviour and UI parity on those platforms are unverified. Multipoint/source switching is inherited and outside this fork's verified scope.
+**Custom 1/2 persistence, Speak-to-Chat timeout and Wind Noise Reduction still need a complete hardware retest of the current commit.** Their packet handling has automated regression coverage; that is not a claim of hardware verification. Windows and Linux have build/test coverage, but XM4C hardware behaviour and UI parity on those platforms are unverified. The maintainer has tested XM4C multipoint switching, reconnection and control handover with Sound Connect on Android. Experimental playback switching/fixing remains outside the verified scope.
 
 The maintainer has tested the application locally and confirmed installation from a packaged DMG on their Mac. This does not establish compatibility with every firmware or configuration.
 
+## Using SonyBridge with Sound Connect
+
+**WH-1000XM4C supports one active control app at a time.** Connecting Sound Connect on Android disconnects SonyBridge's control session on Mac, and vice versa. Bluetooth audio connections remain active. This behaviour was confirmed on XM4C firmware 1.1.2.
+
+To control the headset from SonyBridge, close Sound Connect on your phone and connect SonyBridge. To return to the phone app, choose **Release control to phone** in SonyBridge, then open Sound Connect. Android can automatically launch Sound Connect when the headset connects, which can also transfer control away from SonyBridge.
+
+SonyBridge reports a closed control connection separately from a lost system Bluetooth connection. A control-link close event does not identify its cause, so the app does not attribute every closure to Sound Connect.
+
 ## Download and install on macOS
 
-Download **SonyBridge XM4C.dmg** from [this fork's releases](https://github.com/PawDD/SonyBridge/releases). Use the current macOS release. The filename stays simple; the source revision is recorded inside the app. The upstream Homebrew cask and upstream downloads do not contain this fork's changes.
+**Version 0.4.1 is a recommended maintenance update for WH-1000XM4C users.** It improves multipoint switching, reconnection and the connected-device display. See the [changelog](CHANGELOG.md).
+
+Download **SonyBridge XM4C.dmg** from [this fork's latest release](https://github.com/PawDD/SonyBridge/releases/latest). Use the current macOS release. The filename stays simple; the source revision is recorded inside the app. The upstream Homebrew cask and upstream downloads do not contain this fork's changes.
 
 1. Open the DMG and drag **SonyBridge.app** onto **Applications**.
 2. Eject the disk image, then launch SonyBridge from Applications.

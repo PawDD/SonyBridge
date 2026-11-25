@@ -896,7 +896,7 @@ namespace
 
 	// 37 <type> <count> { <address, 17 ASCII> <slot> [<class of device, 3 bytes BE>] <name length> <name> } x count <playback slot>
 	// Returns false (and leaves `out` untouched) on any length mismatch, so a misread never reaches the UI.
-	bool parsePairedDevices(const Buffer& resp, bool withClassOfDevice, std::vector<PairedDevice>& out)
+	bool parsePairedDevices(const Buffer& resp, bool withClassOfDevice, bool allowXm4cPlaceholder, std::vector<PairedDevice>& out)
 	{
 		if (resp.size() < 4) return false;
 		size_t pos = 2;
@@ -910,6 +910,7 @@ namespace
 			device.address.assign(resp.begin() + pos, resp.begin() + pos + V2Table2Command::BT_ADDRESS_LENGTH);
 			pos += V2Table2Command::BT_ADDRESS_LENGTH;
 			device.slot = (unsigned char)resp[pos++];
+            if (device.slot > 2) return false;
 			if (withClassOfDevice)
 			{
 				device.classOfDevice = ((unsigned char)resp[pos] << 16) | ((unsigned char)resp[pos + 1] << 8) | (unsigned char)resp[pos + 2];
@@ -919,11 +920,22 @@ namespace
 			if (pos + nameLength > resp.size()) return false;
 			device.name.assign(resp.begin() + pos, resp.begin() + pos + nameLength);
 			pos += nameLength;
+            // XM4C can append a literal placeholder after a final disconnected record
+            // with an empty declared name, immediately before the playback slot.
+            // Accept only this exact tail, never infer arbitrary lengths or skip unknown bytes.
+            static const std::string placeholder = "Unknown Device";
+            if (allowXm4cPlaceholder && !withClassOfDevice && i + 1 == count
+                && device.slot == 0 && nameLength == 0 && pos + placeholder.size() + 1 == resp.size()
+                && std::equal(placeholder.begin(), placeholder.end(), resp.begin() + pos)) {
+                device.name = placeholder;
+                pos += placeholder.size();
+            }
 			devices.push_back(device);
 		}
 		if (pos + 1 != resp.size()) return false;
 		// The trailing byte is the slot (1/2) that holds playback, not an index into the list.
 		int playbackSlot = (unsigned char)resp[pos];
+        if (playbackSlot > 2) return false;
 		for (auto& device : devices)
 		{
 			device.playback = device.slot != 0 && device.slot == playbackSlot;
@@ -939,6 +951,7 @@ void Headphones::requestMultipoint()
 
 	Buffer initReply;
 	bool table2Supported;
+    bool allowXm4cPlaceholder;
 	bool functionsRead;
 	std::vector<unsigned char> functions;
 	bool slotSearched;
@@ -948,6 +961,7 @@ void Headphones::requestMultipoint()
 		std::lock_guard guard(this->_propertyMtx);
 		initReply = this->_initReply;
 		table2Supported = this->_table2Supported;
+        allowXm4cPlaceholder = this->_isWh1000Xm4c();
 		functionsRead = this->_table2FunctionsRead;
 		functions = this->_table2Functions;
 		slotSearched = this->_multipointSlotSearched;
@@ -1009,7 +1023,7 @@ void Headphones::requestMultipoint()
 			unsigned char type = withClassOfDevice ? V2Table2Command::PERI_DEVICES_WITH_COD : V2Table2Command::PERI_DEVICES_CLASSIC;
 			auto resp = read({ (char)V2Table2Command::PERI_GET_PARAM, (char)type },
 				V2Table2Command::PERI_RET_PARAM, type, DATA_TYPE::DATA_MDR_NO2);
-			hasPairedDevices = parsePairedDevices(resp, withClassOfDevice, pairedDevices);
+			hasPairedDevices = parsePairedDevices(resp, withClassOfDevice, allowXm4cPlaceholder, pairedDevices);
 			if (!resp.empty() && !hasPairedDevices) log += "device list: unexpected layout\n";
 		}
 
@@ -1074,7 +1088,7 @@ void Headphones::requestMultipoint()
 	this->_multipointEnabled = multipointEnabled;
 	this->_multipointDiscoveryLog = discoveryLog;
 	this->_multipointDiagnostics = "init " + (initReply.empty() ? std::string("(no reply)") : hexString(initReply)) + "\n"
-		+ discoveryLog + this->_multipointWriteLog + log;
+		+ discoveryLog + log;
 }
 
 int Headphones::switchPlaybackDevice(const std::string& address)
@@ -1154,23 +1168,59 @@ std::vector<PairedDevice> Headphones::getPairedDevices() { std::lock_guard g(thi
 bool Headphones::hasPlaybackPinState() { std::lock_guard g(this->_propertyMtx); return this->_hasPlaybackPinState; }
 bool Headphones::isPlaybackPinned() { std::lock_guard g(this->_propertyMtx); return this->_playbackPinned; }
 bool Headphones::hasMultipointSetting() { std::lock_guard g(this->_propertyMtx); return this->_hasMultipointSetting; }
+bool Headphones::canSetMultipoint() {
+    std::lock_guard g(this->_propertyMtx);
+    return this->_hasMultipointSetting && (!this->_isWh1000Xm4c() || this->_multipointSlot == 0xd2);
+}
+bool Headphones::multipointRequiresReconnect() {
+    std::lock_guard g(this->_propertyMtx);
+    return this->_conn.getProtocolVersion() == SonyProtocolVersion::V2 && this->_isWh1000Xm4c();
+}
 bool Headphones::getMultipointEnabled() { std::lock_guard g(this->_propertyMtx); return this->_multipointEnabled; }
-std::string Headphones::getMultipointDiagnostics() { std::lock_guard g(this->_propertyMtx); return this->_multipointDiagnostics; }
+std::string Headphones::getMultipointDiagnostics() { std::lock_guard g(this->_propertyMtx); return this->_multipointDiagnostics + this->_multipointWriteLog; }
 
 void Headphones::setMultipoint(bool enabled)
 {
-	int slot;
-	{
-		std::lock_guard guard(this->_propertyMtx);
-		if (!this->_hasMultipointSetting) throw RecoverableException("This headset doesn't report a multipoint setting.");
-		slot = this->_multipointSlot;
-	}
-	// The state frame goes first (d8 <slot> 00 <00=on/01=off>), then the fixed apply commit 98 00 06 01.
-	// sendCommand waits for each ACK, which reproduces GadgetBridge's frame/ack interleaving.
-	this->_conn.sendCommand({ (char)V2Command::GS_SET_PARAM, (char)slot, 0x00, (char)(enabled ? 0x00 : 0x01) });
-	this->_conn.sendCommand({ (char)V2Command::SYSCTL_SET, 0x00, (char)V2Command::SUB_SYSCTL_MULTIPOINT, 0x01 });
-	std::lock_guard guard(this->_propertyMtx);
-	this->_multipointEnabled = enabled;
+    int slot;
+    bool xm4c;
+    {
+        std::lock_guard guard(this->_propertyMtx);
+        if (!this->_hasMultipointSetting) throw RecoverableException("This headset doesn't report a multipoint setting.");
+        slot = this->_multipointSlot;
+        xm4c = this->_isWh1000Xm4c();
+        if (xm4c && slot != 0xd2)
+            throw RecoverableException("Unverified XM4C multipoint setting layout; no command sent.");
+    }
+    Buffer command = { (char)V2Command::GS_SET_PARAM, (char)slot, 0x00, (char)(enabled ? 0x00 : 0x01) };
+    if (xm4c) {
+        auto record = [&](const std::string& line) {
+            std::lock_guard guard(this->_propertyMtx);
+            this->_multipointWriteLog += line + "\n";
+        };
+        try {
+            record("W T1 " + hexString(command) + " (waiting for headset alert)");
+            auto alert = this->_conn.sendCommandAndReadResponse(command, V2Command::ALERT_NTFY_PARAM, 0x00);
+            record("R T1 " + hexString(alert));
+            // Validate the supported alert layout in both setting directions.
+            // _readMessage() has acknowledged it before this call returns. Never confirm a
+            // guessed message, a truncated alert, or a transport ACK without an alert.
+            const Buffer expected = {(char)0x99, 0x00, 0x06, 0x01};
+            if (alert != expected) throw RecoverableException("Unexpected multipoint alert; confirmation was not sent.");
+            Buffer confirmation = {(char)V2Command::ALERT_SET_PARAM, alert[1], alert[2], 0x01};
+            record("W T1 " + hexString(confirmation));
+            this->_conn.sendCommand(confirmation);
+            record("multipoint confirmation acknowledged; reconnect and fresh read required");
+        } catch (const std::exception& exc) {
+            record(std::string("multipoint change unconfirmed: ") + exc.what());
+            throw;
+        }
+        // The headset now restarts. Do not label an optimistic cache as read-back state.
+        return;
+    }
+    this->_conn.sendCommand(command);
+    this->_conn.sendCommand({ (char)V2Command::SYSCTL_SET, 0x00, (char)V2Command::SUB_SYSCTL_MULTIPOINT, 0x01 });
+    std::lock_guard guard(this->_propertyMtx);
+    this->_multipointEnabled = enabled;
 }
 
 // requestAmbientState() deliberately refuses to adopt device state while a change is pending, so a write

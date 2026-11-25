@@ -144,6 +144,8 @@ public:
 	bool hasPlaybackPinState();
 	bool isPlaybackPinned();
 	bool hasMultipointSetting();
+    bool canSetMultipoint();
+    bool multipointRequiresReconnect();
 	bool getMultipointEnabled();
 	// Hex log of the init reply and every multipoint request/reply from the last requestMultipoint(),
 	// for bringing the protocol up on models nobody has captured yet.

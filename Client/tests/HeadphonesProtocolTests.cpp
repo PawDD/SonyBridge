@@ -107,12 +107,14 @@ public:
 
 		Buffer body(frame.begin() + 1, frame.end() - 1);
 		auto message = CommandSerializer::unpackBtMessage(body);
-		if (message.dataType != DATA_TYPE::DATA_MDR) return static_cast<int>(length);
+        if (onSend) onSend(message);
+		if (message.dataType != DATA_TYPE::DATA_MDR
+            && !(acceptTable2 && message.dataType == DATA_TYPE::DATA_MDR_NO2)) return static_cast<int>(length);
 
 		sentPayloads.push_back(message.payload);
 		queue({}, DATA_TYPE::ACK, 1 - message.seqNumber);
 		auto response = reply ? reply(message.payload) : Buffer{};
-		if (!response.empty()) queue(response, DATA_TYPE::DATA_MDR, 0);
+		if (!response.empty()) queue(response, message.dataType, 0);
 		return static_cast<int>(length);
 	}
 
@@ -122,6 +124,10 @@ public:
 		auto frame = std::move(incoming.front());
 		incoming.pop_front();
 		if (frame.size() > length) throw std::runtime_error("fake response exceeds receive buffer");
+        if (onReceive) {
+            Buffer body(frame.begin()+1, frame.end()-1);
+            onReceive(CommandSerializer::unpackBtMessage(body));
+        }
 		std::memcpy(buf, frame.data(), frame.size());
 		return static_cast<int>(frame.size());
 	}
@@ -132,8 +138,11 @@ public:
 	std::vector<BluetoothDevice> getConnectedDevices() override { return {}; }
 	SonyProtocolVersion getProtocolVersion() noexcept override { return SonyProtocolVersion::V2; }
 
-	std::vector<Buffer> sentPayloads;
+	bool acceptTable2 = false;
+    std::vector<Buffer> sentPayloads;
 	std::function<Buffer(const Buffer&)> reply;
+    std::function<void(const CommandSerializer::Message&)> onReceive;
+    std::function<void(const CommandSerializer::Message&)> onSend;
 
 	bool sent(const Buffer& payload) const
 	{
@@ -313,6 +322,56 @@ int main()
 	require(onCommit == Buffer({ (char)0x98, 0x00, 0x06, 0x01 }),
 		"multipoint ON must reuse the fixed apply commit 98 00 06 01");
 	require(ult900n.getMultipointEnabled(), "multipoint ON was not mirrored locally");
+
+    // XM4C regression: D2 SET, alert, ACK, confirmation.
+    // An ACK alone must never authorize the confirmation. No writes are retried.
+    for (bool enable : {false, true}) {
+        for (const Buffer& alert : {bytes({0x99, 0, 6, 1}), Buffer{}, bytes({0x99, 0, 7, 1}),
+                                    bytes({0x99, 0, 6}), bytes({0x99, 0, 6, 0})}) {
+            auto fake = std::make_unique<FakeV2Connector>();
+            auto* observed = fake.get();
+            bool alertRead = false;
+            bool alertAcknowledged = false;
+            fake->onSend = [&](const CommandSerializer::Message& message) {
+                if (alertRead && message.dataType == DATA_TYPE::ACK) alertAcknowledged = true;
+            };
+            fake->onReceive = [&](const CommandSerializer::Message& message) {
+                if (message.payload == alert && !alert.empty()) alertRead = true;
+            };
+            fake->reply = [&](const Buffer& request) -> Buffer {
+                if (request == bytes({0xd0, 0xd2, 1})) {
+                    std::string name = "MULTIPOINT_SETTING";
+                    Buffer response = bytes({0xd1, 0xd2, 0, 1, (int)name.size()});
+                    response.insert(response.end(), name.begin(), name.end());response.push_back(0);
+                    return response;
+                }
+                if (request == bytes({0xd6, 0xd2})) return bytes({0xd7, 0xd2, 0, enable ? 1 : 0});
+                if (request == bytes({0xd8, 0xd2, 0, enable ? 0 : 1})) return alert;
+                if (request == bytes({0x98, 0, 6, 1})) require(alertRead && alertAcknowledged, "confirmation preceded receiving/acknowledging the alert");
+                return {};
+            };
+            BluetoothWrapper bt(std::move(fake));Headphones hp(bt);hp.setDeviceName("WH-1000XM4C");hp.requestMultipoint();
+            require(hp.canSetMultipoint(), "supported XM4C D2 setting was not writable");
+            size_t before=observed->sentPayloads.size();bool failed=false;
+            try { hp.setMultipoint(enable); } catch (const std::exception&) { failed=true; }
+            bool expected=alert==bytes({0x99,0,6,1});
+            require(failed != expected, "XM4C alert validation returned wrong result");
+            require(observed->sentPayloads.size()==before+(expected?2:1), "XM4C sent confirmation without valid alert or retried SET");
+            require(observed->sentPayloads[before]==bytes({0xd8,0xd2,0,enable?0:1}), "XM4C wrote the wrong slot/value");
+            if (expected) require(observed->sentPayloads.back()==bytes({0x98,0,6,1}), "XM4C confirmation has unexpected payload");
+            require(hp.getMultipointEnabled()!=enable, "XM4C cached desired state without reconnect/read-back");
+            require(hp.getMultipointDiagnostics().find("W T1 d8 d2") != std::string::npos,
+                "multipoint write trace was unavailable before another status read");
+            if (expected) require(hp.getMultipointDiagnostics().find("R T1 99 00 06 01") != std::string::npos,
+                "accepted headset alert was absent from diagnostics");
+        }
+    }
+    // A different setting slot is outside the supported XM4C write profile.
+    ult900n.setDeviceName("WH-1000XM4C");
+    require(!ult900n.canSetMultipoint(), "XM4C D1 was incorrectly authorized by the D2 profile");
+    auto beforeBlocked=observedV2->sentPayloads.size();bool blocked=false;
+    try { ult900n.setMultipoint(false); } catch (const std::exception&) { blocked=true; }
+    require(blocked && observedV2->sentPayloads.size()==beforeBlocked, "unverified XM4C slot sent a command");
 
 	// --- WH-1000XM6 (issue #11): noise control reads via 0x19, the equalizer is the ten-band 0x04 layout.
 	// Frames captured on fw 3.1.5 by marconvcm/sony-device-center (#44, #74). ---
@@ -634,6 +693,68 @@ int main()
 		"unexpected escaped byte did not throw RecoverableException");
 	expectRecoverable([] { CommandSerializer::unpackBtMessage(Buffer{ 0x00, 0x00, 0x00 }); },
 		"under-minimum-size frame did not throw RecoverableException");
+
+    // Synthetic XM4C list regression: the final record declares zero name bytes
+    // but carries a literal placeholder before the playback slot.
+    {
+        const std::string macName = "Test Mac (é)";
+        const std::string phoneName = "Test phone";
+        Buffer capture = bytes({0x37, 0x00, 0x03});
+        auto appendDevice = [&](const std::string& address, int slot, const std::string& name, int length) {
+            capture.insert(capture.end(), address.begin(), address.end());
+            capture.push_back((char)slot);
+            capture.push_back((char)length);
+            capture.insert(capture.end(), name.begin(), name.end());
+        };
+        appendDevice("00:00:00:00:00:01", 2, macName, (int)macName.size());
+        appendDevice("00:00:00:00:00:02", 1, phoneName, (int)phoneName.size());
+        appendDevice("00:00:00:00:00:03", 0, "Unknown Device", 0);
+        capture.push_back(1); // playback belongs to slot 1 (phone), not list index 1
+
+        auto readList = [&](const Buffer& response, const std::string& model) {
+            auto fake = std::make_unique<FakeV2Connector>();
+            fake->acceptTable2 = true;
+            fake->reply = [&](const Buffer& request) -> Buffer {
+                if (request == bytes({0x00, 0x00})) return bytes({0x01, 0x00, 0x03, 0x00, 0x30, 0x37, 0x00, 0x00});
+                if (request == bytes({0x06, 0x00})) return bytes({0x07, 0x00, 0x01, 0x30, 0x01});
+                if (request == bytes({0x36, 0x00})) return response;
+                return {};
+            };
+            BluetoothWrapper bt(std::move(fake));
+            Headphones hp(bt);
+            hp.setDeviceName(model);
+            hp.initDevice();
+            hp.requestMultipoint();
+            return std::make_pair(hp.hasPairedDevices(), hp.getPairedDevices());
+        };
+        auto [available, devices] = readList(capture, "WH-1000XM4C");
+        require(available && devices.size() == 3, "XM4C placeholder discarded the connected-device list");
+        require(devices[0].name == macName && devices[0].slot == 2 && !devices[0].playback,
+            "Mac UTF-8 name or connection slot was misread");
+        require(devices[1].name == phoneName && devices[1].slot == 1 && devices[1].playback,
+            "phone name, slot or playback ownership was misread");
+        require(devices[2].name == "Unknown Device" && devices[2].slot == 0 && !devices[2].playback,
+            "placeholder must remain paired-only");
+        require(!readList(capture, "WH-1000XM6").first, "XM4C workaround leaked to unrelated models");
+
+        Buffer standard = capture;
+        const size_t lengthOffset = standard.size() - 16;
+        standard[lengthOffset] = 14;
+        require(readList(standard, "WH-1000XM4C").first, "standard length-prefixed name was rejected");
+        Buffer emptyName = capture;
+        emptyName.erase(emptyName.end() - 15, emptyName.end() - 1);
+        require(readList(emptyName, "WH-1000XM4C").first, "ordinary empty name was rejected");
+        for (size_t length = 0; length < capture.size(); ++length) {
+            require(!readList(Buffer(capture.begin(), capture.begin() + length), "WH-1000XM4C").first,
+                "truncated XM4C list was accepted");
+        }
+        Buffer garbage = capture;
+        garbage[garbage.size() - 15] = 'X';
+        require(!readList(garbage, "WH-1000XM4C").first, "arbitrary uncounted name bytes were accepted");
+        garbage = capture;
+        garbage.push_back(0);
+        require(!readList(garbage, "WH-1000XM4C").first, "trailing garbage was accepted");
+    }
 
 	std::cout << "XM4 / multipoint / XM6 protocol tests passed\n";
 	return 0;

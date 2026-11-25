@@ -125,6 +125,31 @@ int main()
 		}
 	}
 
+    // Cancellation must interrupt an idle read promptly, without waiting for its 2.5s timeout.
+    {
+        MacOSBluetoothConnector connector;
+        connector.running = true;
+        auto reader = std::async(std::launch::async, [&] {
+            char byte;
+            try { connector.recv(&byte, 1); return false; }
+            catch (const RecoverableException&) { return true; }
+        });
+        connector.cancelPendingReads();
+        require(reader.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready,
+            "cancel did not wake the pending receive");
+        require(reader.get(), "cancelled receive did not report a closed connection");
+    }
+    // Async open errors must be retained and stop reads; a successful callback keeps the session alive.
+    {
+        MacOSBluetoothConnector connector;
+        connector.running = true;
+        connector.handleChannelOpenComplete(0);
+        require(connector.running, "successful open cancelled the session");
+        connector.handleChannelOpenComplete(-1);
+        require(!connector.running && connector.channelOpenStatus() == -1,
+            "failed async open was not retained or did not cancel the session");
+    }
+
 	std::cout << "macOS connector receive-buffer tests passed\n";
 	return 0;
 }

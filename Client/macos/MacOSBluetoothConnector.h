@@ -16,18 +16,21 @@ public:
     MacOSBluetoothConnector();
     ~MacOSBluetoothConnector();
     static void connectToMac(MacOSBluetoothConnector* MacOSBluetoothConnector, std::promise<void> connectPromise) noexcept(false);
-    virtual void connect(const std::string& addrStr) noexcept(false);
-    virtual int send(char* buf, size_t length) noexcept(false);
-    virtual int recv(char* buf, size_t length) noexcept(false);
-    virtual void disconnect() noexcept;
-    virtual bool isConnected() noexcept;
+    virtual void connect(const std::string& addrStr) noexcept(false) override;
+    virtual int send(char* buf, size_t length) noexcept(false) override;
+    virtual int recv(char* buf, size_t length) noexcept(false) override;
+    void cancelPendingReads() noexcept override;
+    virtual void disconnect() noexcept override;
+    virtual bool isConnected() noexcept override;
     virtual void closeConnection();
-    virtual SonyProtocolVersion getProtocolVersion() noexcept;
+    virtual SonyProtocolVersion getProtocolVersion() noexcept override;
 
     // Called by the Objective-C RFCOMM delegate when the peer closes the channel. Delegate callbacks
     // are delivered on the main thread's run loop (the connector thread never pumps one), so this
     // must only signal shutdown; disconnect()'s close-and-join runs on whichever thread invokes it.
     void handleChannelClosed() noexcept;
+    void handleChannelOpenComplete(int status) noexcept;
+    int channelOpenStatus() const noexcept { return openStatus.load(); }
 
     // Called by the Objective-C RFCOMM delegate for every received data frame. Drops zero-length
     // frames (recv() returning 0 reads as "connection closed" upstream) and caps the total buffered
@@ -39,7 +42,7 @@ public:
     // at most MAX_BLUETOOTH_MESSAGE_SIZE; 16 of them is far more than any legitimate burst.
     static constexpr size_t RECEIVE_BUFFER_CAP = MAX_BLUETOOTH_MESSAGE_SIZE * 16;
 
-    virtual std::vector<BluetoothDevice> getConnectedDevices() noexcept(false);
+    virtual std::vector<BluetoothDevice> getConnectedDevices() noexcept(false) override;
     std::deque<std::vector<unsigned char>> receivedBytes;
     std::mutex receiveDataMutex;
     std::condition_variable receiveDataConditionVariable;
@@ -51,6 +54,7 @@ public:
     SonyProtocolVersion protocolVersion = SonyProtocolVersion::V1;
 
 private:
+    std::atomic<int> openStatus{0};
     void *rfcommDevice = nullptr;
     // Owning (+1, CFBridgingRetain) reference to the open IOBluetoothRFCOMMChannel, or null. Guarded by
     // channelMtx: readers take their own strong reference under the lock, so a remote close on the main

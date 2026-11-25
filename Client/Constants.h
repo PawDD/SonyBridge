@@ -126,13 +126,15 @@ namespace V2Command
 	inline constexpr unsigned char GS_SLOT_FIRST     = 0xd1;
 	inline constexpr unsigned char GS_SLOT_LAST      = 0xd4;
 	inline constexpr unsigned char GS_DISPLAY_LANGUAGE_ENGLISH = 0x01;
-	// SET d8 <slot> 00 <00=ON/01=OFF>. For the multipoint slot the change is committed with the fixed
-	// system-control frame 98 00 06 01 (identical bytes for ON and OFF); its RET (97 00 06 xx) always reports
-	// 01, so it is never used as a state source. Order and bytes from GadgetBridge's hardware-verified
-	// WH-ULT900N support (SonyProtocolImplV2, commits 8cbc309346, e8520865f3, 5d7b37d1b7).
-	inline constexpr unsigned char GS_SET_PARAM      = 0xd8;
-	inline constexpr unsigned char SYSCTL_SET        = 0x98;
-	inline constexpr unsigned char SUB_SYSCTL_MULTIPOINT = 0x06;
+	// General-setting writes and alert confirmations are separate protocol steps.
+	// XM4C requires a matching headset alert before confirmation and a new session afterwards.
+	inline constexpr unsigned char GS_SET_PARAM = 0xd8;
+	inline constexpr unsigned char ALERT_SET_PARAM = 0x98;
+	inline constexpr unsigned char ALERT_NTFY_PARAM = 0x99;
+	inline constexpr unsigned char ALERT_MULTIPOINT_LDAC_DISABLE = 0x06;
+	// Legacy ULT900N path, retained for compatibility.
+	inline constexpr unsigned char SYSCTL_SET = ALERT_SET_PARAM;
+	inline constexpr unsigned char SUB_SYSCTL_MULTIPOINT = ALERT_MULTIPOINT_LDAC_DISABLE;
 }
 
 // Second command table (frame DATA_TYPE::DATA_MDR_NO2 = 0x0e) on v2 devices: multipoint / paired-device
