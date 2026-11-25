@@ -124,6 +124,13 @@ def main():
         (notices / "BUILD.txt").write_text(
             "SonyBridge XM4C — macOS\n"
             f"Source: {SOURCE_URL}\nCommit: {revision}\n"
+            "Selected macOS SDK: "
+            + run("xcrun", "--sdk", "macosx", "--show-sdk-version", capture=True).stdout.decode().strip()
+            + "\nCompiler: "
+            + run("xcrun", "swiftc", "--version", capture=True).stdout.decode().strip()
+            + "\nXcode: "
+            + run("xcodebuild", "-version", capture=True).stdout.decode().strip()
+            + "\n"
             "Packaging adds licenses and replaces the ad-hoc signature without\n"
             "debugger entitlement. Application code is unchanged from the input build.\n"
             "This package is not Apple-notarized.\n",

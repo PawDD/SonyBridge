@@ -146,6 +146,7 @@ public:
 	bool hasMultipointSetting();
     bool canSetMultipoint();
     bool multipointRequiresReconnect();
+    bool multipointConfirmationAttempted();
 	bool getMultipointEnabled();
 	// Hex log of the init reply and every multipoint request/reply from the last requestMultipoint(),
 	// for bringing the protocol up on models nobody has captured yet.
@@ -236,6 +237,7 @@ private:
 	bool _hasPlaybackPinState = false; bool _playbackPinned = false;
 	bool _multipointSlotSearched = false; int _multipointSlot = -1;
 	bool _hasMultipointSetting = false; bool _multipointEnabled = false;
+    bool _multipointConfirmationAttempted = false;
 	std::string _multipointDiscoveryLog;
 	std::string _multipointWriteLog;
 	std::string _multipointDiagnostics;

@@ -165,7 +165,11 @@ void MacOSBluetoothConnector::connect(const std::string& addrStr){
     if (![device isConnected]) {
         IOReturn status = [device openConnection];
         if (status != kIOReturnSuccess) {
-            throw RecoverableException("Could not connect to the headset (Bluetooth status " + std::to_string(status) + "). Check macOS Bluetooth and available multipoint slots.", false);
+            NSLog(@"SonyBridge: Bluetooth connection failed (status %d)", status);
+            if (status == kIOReturnTimeout) {
+                throw RecoverableException("The headset did not respond. Turn it on, keep it nearby, and try connecting again.", false);
+            }
+            throw RecoverableException("Could not connect to the headset. Make sure it is turned on and connect it in macOS Bluetooth settings, then try again.", false);
         }
     }
     std::promise<void> connectPromise;

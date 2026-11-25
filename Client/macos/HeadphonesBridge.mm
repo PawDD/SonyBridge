@@ -62,6 +62,7 @@ static NSString *SHCNormalizedAddress(NSString *address) {
     NSString *_deviceName;
     NSString *_deviceMac;
     NSString *_lastMultipointWriteDiagnostics;
+    NSUInteger _connectionGeneration;
     std::atomic_bool _initialized;
     // Only touched inside blocks on _cmdQueue, which is serial.
     unsigned _dynamicTick;
@@ -247,6 +248,7 @@ static NSString *SHCNormalizedAddress(NSString *address) {
 - (BOOL)hasMultipointSetting { return _hp && _hp->hasMultipointSetting(); }
 - (BOOL)canSetMultipoint { return _hp && _hp->canSetMultipoint(); }
 - (BOOL)multipointRequiresReconnect { return _hp && _hp->multipointRequiresReconnect(); }
+- (BOOL)multipointConfirmationAttempted { return _hp && _hp->multipointConfirmationAttempted(); }
 - (BOOL)multipointEnabled { return _hp && _hp->getMultipointEnabled(); }
 - (NSString *)multipointDiagnostics {
     NSString *current = _hp ? @(_hp->getMultipointDiagnostics().c_str()) : @"";
@@ -324,18 +326,29 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
 }
 
 - (void)reconnectToAddress:(NSString *)address completion:(void (^)(BOOL, NSString * _Nullable))completion {
-    // Old operations retain their Headphones object. Let them finish on the closed link before
-    // opening a replacement, so an old poll cannot issue commands in a new pre-init session.
+    IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
+    if (!device || !device.isPaired) { completion(NO, @"The selected headset is no longer paired."); return; }
+    [self connectDevice:device completion:completion];
+}
+
+- (void)connectDevice:(IOBluetoothDevice *)device completion:(void (^)(BOOL, NSString * _Nullable))completion {
+    // Every connection path must drain old work on a closed link, including manual
+    // reconnect after another control app takes over. Otherwise an old retained
+    // Headphones object can send inquiries through the replacement before its INIT.
+    [self disconnect];
+    NSUInteger generation = _connectionGeneration;
     dispatch_async(_cmdQueue, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
-            IOBluetoothDevice *device = [IOBluetoothDevice deviceWithAddressString:address];
-            if (!device || !device.isPaired) { completion(NO, @"The selected headset is no longer paired."); return; }
-            [self connectDevice:device completion:completion];
+            if (self->_connectionGeneration != generation) {
+                completion(NO, @"Connection cancelled.");
+                return;
+            }
+            [self openDevice:device completion:completion];
         });
     });
 }
 
-- (void)connectDevice:(IOBluetoothDevice *)device completion:(void (^)(BOOL, NSString * _Nullable))completion {
+- (void)openDevice:(IOBluetoothDevice *)device completion:(void (^)(BOOL, NSString * _Nullable))completion {
     // A device without an address string would hand std::string a null char* below (undefined
     // behaviour); getConnectedDevices() applies the same guard.
     NSString *address = [device addressString];
@@ -381,7 +394,7 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
         NSString *error = nil;
         try { hp->initDevice(); }
         catch (const std::exception &exc) {
-            error = [NSString stringWithFormat:@"The headset did not complete Sony initialization: %s. Close the headphone app on Android and try again.", exc.what()];
+            error = [NSString stringWithFormat:@"The headset did not complete Sony initialization: %s. Try connecting again.", exc.what()];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (self->_hp != hp) { completion(NO, @"Connection cancelled."); return; }
@@ -397,6 +410,7 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
 }
 
 - (void)disconnect {
+    ++_connectionGeneration;
     if (_bt) _bt->disconnect();
     _hp.reset();
     _deviceName = nil;

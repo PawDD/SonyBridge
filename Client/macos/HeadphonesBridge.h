@@ -94,6 +94,7 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 @property (nonatomic, readonly) BOOL hasMultipointSetting;
 @property (nonatomic, readonly) BOOL canSetMultipoint;
 @property (nonatomic, readonly) BOOL multipointRequiresReconnect;
+@property (nonatomic, readonly) BOOL multipointConfirmationAttempted;
 @property (nonatomic, readonly) BOOL multipointEnabled;
 @property (nonatomic, copy, readonly) NSString *multipointDiagnostics; // hex log of the last multipoint reads
 

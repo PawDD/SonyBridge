@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2 — 2026-11-25
+
+Maintenance update superseding 0.4.1.
+
+- Restore the macOS SDK 27.2 appearance baseline and reject builds with a different SDK. Record SDK, compiler and Xcode versions in package metadata.
+- Enable required session alerts before XM4C multipoint changes, fixing timeouts in fresh sessions.
+- Reconnect once and verify the actual multipoint setting when the headset restarts before acknowledging the confirmation; never resend the setting during recovery.
+- Drain old control-session work before every connection attempt and respect cancellation while waiting for the queue.
+- Align the multipoint switch with other switches and place refresh beside the expanded “Connected devices” heading, with a consistent button style.
+- Remove the redundant phone-control action and experimental footer from the multipoint panel. Move “Copy diagnostics” to the device information popover and retain access after a connection error.
+- Keep the last multipoint attempt locally across application restarts, and clarify Bluetooth timeout and disconnection messages.
+
+Controlled hardware checks covered multipoint changes and control handover on XM4C firmware 1.1.2 with an Apple Silicon Mac. Missing-confirmation-ACK recovery also has automated regression coverage. This is not a claim that all firmware, idle power-off edge cases or experimental playback controls are verified.
+
+The universal macOS installer is built from source with Xcode 27.2 and macOS SDK 27.2.
+
 ## 0.4.1 — 2026-11-25
 
 Recommended maintenance update for WH-1000XM4C users.

@@ -112,7 +112,8 @@ public:
             && !(acceptTable2 && message.dataType == DATA_TYPE::DATA_MDR_NO2)) return static_cast<int>(length);
 
 		sentPayloads.push_back(message.payload);
-		queue({}, DATA_TYPE::ACK, 1 - message.seqNumber);
+		if (!(omitConfirmationAck && message.payload == Buffer{(char)0x98, 0, 6, 1}))
+            queue({}, DATA_TYPE::ACK, 1 - message.seqNumber);
 		auto response = reply ? reply(message.payload) : Buffer{};
 		if (!response.empty()) queue(response, message.dataType, 0);
 		return static_cast<int>(length);
@@ -139,6 +140,7 @@ public:
 	SonyProtocolVersion getProtocolVersion() noexcept override { return SonyProtocolVersion::V2; }
 
 	bool acceptTable2 = false;
+    bool omitConfirmationAck = false;
     std::vector<Buffer> sentPayloads;
 	std::function<Buffer(const Buffer&)> reply;
     std::function<void(const CommandSerializer::Message&)> onReceive;
@@ -323,48 +325,97 @@ int main()
 		"multipoint ON must reuse the fixed apply commit 98 00 06 01");
 	require(ult900n.getMultipointEnabled(), "multipoint ON was not mirrored locally");
 
-    // XM4C regression: D2 SET, alert, ACK, confirmation.
+    // XM4C regression: enable session alerts, D2 SET, alert, ACK, confirmation.
     // An ACK alone must never authorize the confirmation. No writes are retried.
     for (bool enable : {false, true}) {
         for (const Buffer& alert : {bytes({0x99, 0, 6, 1}), Buffer{}, bytes({0x99, 0, 7, 1}),
                                     bytes({0x99, 0, 6}), bytes({0x99, 0, 6, 0})}) {
-            auto fake = std::make_unique<FakeV2Connector>();
-            auto* observed = fake.get();
-            bool alertRead = false;
-            bool alertAcknowledged = false;
-            fake->onSend = [&](const CommandSerializer::Message& message) {
-                if (alertRead && message.dataType == DATA_TYPE::ACK) alertAcknowledged = true;
-            };
-            fake->onReceive = [&](const CommandSerializer::Message& message) {
-                if (message.payload == alert && !alert.empty()) alertRead = true;
-            };
-            fake->reply = [&](const Buffer& request) -> Buffer {
-                if (request == bytes({0xd0, 0xd2, 1})) {
-                    std::string name = "MULTIPOINT_SETTING";
-                    Buffer response = bytes({0xd1, 0xd2, 0, 1, (int)name.size()});
-                    response.insert(response.end(), name.begin(), name.end());response.push_back(0);
-                    return response;
+            for (bool omitAck : {false, true}) {
+                auto fake = std::make_unique<FakeV2Connector>();
+                fake->omitConfirmationAck = omitAck;
+                bool actualState = !enable;
+                auto* observed = fake.get();
+                bool alertRead = false;
+                bool alertAcknowledged = false;
+                bool alertsEnabled = false;
+                fake->onSend = [&](const CommandSerializer::Message& message) {
+                    if (alertRead && message.dataType == DATA_TYPE::ACK) alertAcknowledged = true;
+                };
+                fake->onReceive = [&](const CommandSerializer::Message& message) {
+                    if (message.payload == alert && !alert.empty()) alertRead = true;
+                };
+                fake->reply = [&](const Buffer& request) -> Buffer {
+                    if (request == bytes({0xd0, 0xd2, 1})) {
+                        std::string name = "MULTIPOINT_SETTING";
+                        Buffer response = bytes({0xd1, 0xd2, 0, 1, (int)name.size()});
+                        response.insert(response.end(), name.begin(), name.end());response.push_back(0);
+                        return response;
+                    }
+                    if (request == bytes({0xd6, 0xd2})) return bytes({0xd7, 0xd2, 0, actualState ? 0 : 1});
+                    if (request == bytes({0x94, 0, 0})) alertsEnabled = true;
+                    if (request == bytes({0xd8, 0xd2, 0, enable ? 0 : 1})) {
+                        require(alertsEnabled, "multipoint SET preceded session alert setup");
+                        return alertsEnabled ? alert : Buffer{};
+                    }
+                    if (request == bytes({0x98, 0, 6, 1})) require(alertRead && alertAcknowledged, "confirmation preceded receiving/acknowledging the alert");
+                    return {};
+                };
+                BluetoothWrapper bt(std::move(fake));Headphones hp(bt);hp.setDeviceName("WH-1000XM4C");hp.requestMultipoint();
+                require(hp.canSetMultipoint(), "supported XM4C D2 setting was not writable");
+                size_t before=observed->sentPayloads.size();bool failed=false;
+                try { hp.setMultipoint(enable); } catch (const std::exception&) { failed=true; }
+                bool expected=alert==bytes({0x99,0,6,1});
+                require(failed == (!expected || omitAck), "XM4C alert/confirmation ACK validation returned wrong result");
+                require(hp.multipointConfirmationAttempted() == expected, "recovery allowed before a valid alert or not allowed after confirmation attempt");
+                require(observed->sentPayloads.size()==before+(expected?3:2), "XM4C sent confirmation without valid alert or retried SET");
+                require(observed->sentPayloads[before]==bytes({0x94,0,0}), "XM4C did not enable fixed-message alerts first");
+                require(observed->sentPayloads[before+1]==bytes({0xd8,0xd2,0,enable?0:1}), "XM4C wrote the wrong slot/value");
+                if (expected) require(observed->sentPayloads.back()==bytes({0x98,0,6,1}), "XM4C confirmation has unexpected payload");
+                require(hp.getMultipointEnabled()!=enable, "XM4C cached desired state without reconnect/read-back");
+                require(hp.getMultipointDiagnostics().find("W T1 d8 d2") != std::string::npos,
+                    "multipoint write trace was unavailable before another status read");
+                if (expected) require(hp.getMultipointDiagnostics().find("R T1 99 00 06 01") != std::string::npos,
+                    "accepted headset alert was absent from diagnostics");
+                if (expected && omitAck) {
+                    actualState = enable; // Peer applied the setting despite closing before its ACK.
+                    size_t beforeRead = observed->sentPayloads.size();
+                    hp.requestMultipoint();
+                    require(hp.getMultipointEnabled() == enable, "fresh GET did not recover applied state after lost ACK");
+                    for (size_t i = beforeRead; i < observed->sentPayloads.size(); ++i) {
+                        auto command = (unsigned char)observed->sentPayloads[i][0];
+                        require(command != 0xd8 && command != 0x98 && command != 0x94,
+                                "readback recovery resent a setting or confirmation");
+                    }
                 }
-                if (request == bytes({0xd6, 0xd2})) return bytes({0xd7, 0xd2, 0, enable ? 1 : 0});
-                if (request == bytes({0xd8, 0xd2, 0, enable ? 0 : 1})) return alert;
-                if (request == bytes({0x98, 0, 6, 1})) require(alertRead && alertAcknowledged, "confirmation preceded receiving/acknowledging the alert");
-                return {};
-            };
-            BluetoothWrapper bt(std::move(fake));Headphones hp(bt);hp.setDeviceName("WH-1000XM4C");hp.requestMultipoint();
-            require(hp.canSetMultipoint(), "supported XM4C D2 setting was not writable");
-            size_t before=observed->sentPayloads.size();bool failed=false;
-            try { hp.setMultipoint(enable); } catch (const std::exception&) { failed=true; }
-            bool expected=alert==bytes({0x99,0,6,1});
-            require(failed != expected, "XM4C alert validation returned wrong result");
-            require(observed->sentPayloads.size()==before+(expected?2:1), "XM4C sent confirmation without valid alert or retried SET");
-            require(observed->sentPayloads[before]==bytes({0xd8,0xd2,0,enable?0:1}), "XM4C wrote the wrong slot/value");
-            if (expected) require(observed->sentPayloads.back()==bytes({0x98,0,6,1}), "XM4C confirmation has unexpected payload");
-            require(hp.getMultipointEnabled()!=enable, "XM4C cached desired state without reconnect/read-back");
-            require(hp.getMultipointDiagnostics().find("W T1 d8 d2") != std::string::npos,
-                "multipoint write trace was unavailable before another status read");
-            if (expected) require(hp.getMultipointDiagnostics().find("R T1 99 00 06 01") != std::string::npos,
-                "accepted headset alert was absent from diagnostics");
+            }
         }
+    }
+    // If session alert setup fails, do not send the setting or confirmation.
+    {
+        auto fake = std::make_unique<FakeV2Connector>();
+        auto* observed = fake.get();
+        fake->reply = [&](const Buffer& request) -> Buffer {
+            if (request == bytes({0xd0, 0xd2, 1})) {
+                std::string name = "MULTIPOINT_SETTING";
+                Buffer response = bytes({0xd1, 0xd2, 0, 1, (int)name.size()});
+                response.insert(response.end(), name.begin(), name.end());
+                response.push_back(0);
+                return response;
+            }
+            if (request == bytes({0xd6, 0xd2})) return bytes({0xd7, 0xd2, 0, 1});
+            if (request == bytes({0x94, 0, 0})) throw RecoverableException("alert setup failed", false);
+            return {};
+        };
+        BluetoothWrapper bt(std::move(fake));
+        Headphones hp(bt);
+        hp.setDeviceName("WH-1000XM4C");
+        hp.requestMultipoint();
+        size_t before = observed->sentPayloads.size();
+        bool failed = false;
+        try { hp.setMultipoint(true); } catch (const std::exception&) { failed = true; }
+        require(failed, "failed alert setup was accepted");
+        require(observed->sentPayloads.size() == before + 1,
+                "setting or confirmation was sent after failed alert setup");
     }
     // A different setting slot is outside the supported XM4C write profile.
     ult900n.setDeviceName("WH-1000XM4C");

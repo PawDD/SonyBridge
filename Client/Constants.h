@@ -129,6 +129,7 @@ namespace V2Command
 	// General-setting writes and alert confirmations are separate protocol steps.
 	// XM4C requires a matching headset alert before confirmation and a new session afterwards.
 	inline constexpr unsigned char GS_SET_PARAM = 0xd8;
+	inline constexpr unsigned char ALERT_SET_STATUS = 0x94;
 	inline constexpr unsigned char ALERT_SET_PARAM = 0x98;
 	inline constexpr unsigned char ALERT_NTFY_PARAM = 0x99;
 	inline constexpr unsigned char ALERT_MULTIPOINT_LDAC_DISABLE = 0x06;

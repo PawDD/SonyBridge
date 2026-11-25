@@ -59,6 +59,9 @@ struct ContentView: View {
             }
             ConnectButton(model: model)
                 .padding(.horizontal, 40)
+            if model.errorMessage != nil && !model.diagnosticsToCopy.isEmpty {
+                diagnosticsButton
+            }
             Spacer()
         }
     }
@@ -347,6 +350,8 @@ struct ContentView: View {
                         Button(action: model.refreshConnectionInfo) {
                             Image(systemName: "arrow.clockwise")
                         }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                         .help("Read connection priority and codec without changing settings")
                         .disabled(model.refreshingConnectionInfo)
                     }
@@ -386,29 +391,38 @@ struct ContentView: View {
     // Device names and slots come from the headset; switching/fixing requires an explicit action.
     private var devicesCard: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                if model.hasMultipointSetting {
-                    settingToggle("Connect to 2 devices", "Use two Bluetooth devices at once",
-                                  on: model.multipointEnabled) { model.setMultipoint($0) }
-                        .disabled(model.multipointBusy || !model.canSetMultipoint)
-                } else {
-                    cardTitle("Connect to 2 devices")
-                }
-                Spacer()
-                if model.multipointLoading || model.refreshingMultipoint || model.multipointBusy {
-                    ProgressView()
-                        .scaleEffect(0.5)
-                        .frame(width: 16, height: 16)
-                } else {
-                    Button(action: model.refreshMultipoint) {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(palette.secondary)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                }
+            if model.hasMultipointSetting {
+                settingToggle("Connect to 2 devices", "Use two Bluetooth devices at once",
+                              on: model.multipointEnabled) { model.setMultipoint($0) }
+                    .disabled(model.multipointBusy || !model.canSetMultipoint)
+            } else {
+                cardTitle("Connect to 2 devices")
+            }
+            if model.multipointBusy {
+                ProgressView()
+                    .scaleEffect(0.5)
+                    .frame(width: 16, height: 16)
             }
             if !model.hasMultipointSetting || model.multipointEnabled {
+                HStack {
+                    Text("Connected devices")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(palette.primary)
+                    Spacer()
+                    Button(action: model.refreshMultipoint) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Refresh connected devices")
+                    .accessibilityLabel("Refresh connected devices")
+                    .disabled(model.multipointLoading || model.refreshingMultipoint || model.multipointBusy)
+                    if model.refreshingMultipoint {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 16, height: 16)
+                    }
+                }
                 if model.multipointLoading {
                     HStack(spacing: 10) {
                         ProgressView()
@@ -448,45 +462,29 @@ struct ContentView: View {
                         .font(.system(size: 12))
                         .foregroundColor(palette.secondary)
                 }
-                if !model.multipointLoading {
-                    devicesFooter
-                }
             }
-            Text(model.hasMultipointSetting && !model.canSetMultipoint
-                 ? "This multipoint setting layout is not supported for changes."
-                 : (model.multipointRequiresReconnect
+            if model.hasMultipointSetting && !model.canSetMultipoint {
+                Text("This multipoint setting layout is not supported for changes.")
+                    .font(.system(size: 11))
+                    .foregroundColor(palette.secondary)
+            } else if !model.multipointEnabled {
+                Text(model.multipointRequiresReconnect
                     ? "Changing this setting restarts the headset connection. SonyBridge reconnects automatically."
-                    : "Changing this setting may restart the headset connection."))
-                .font(.system(size: 11))
-                .foregroundColor(palette.secondary)
+                    : "Changing this setting may restart the headset connection.")
+                    .font(.system(size: 11))
+                    .foregroundColor(palette.secondary)
+            }
         }
         .animation(.easeInOut(duration: 0.2), value: model.multipointEnabled)
         .themedCard()
     }
 
-    private var devicesFooter: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Divider().background(palette.cardStroke)
-            Text(model.deviceName.uppercased().contains("WH-1000XM4C")
-                 ? "WH-1000XM4C supports one active control app at a time. Release control here before opening Sound Connect; Bluetooth audio stays connected."
-                 : "Release control here before using the phone app; Bluetooth audio stays connected.")
-                .font(.system(size: 11))
-                .foregroundColor(palette.secondary)
-            CapsuleButton("Release control to phone") { model.releaseControlToPhone() }
-                .disabled(model.multipointBusy)
-            HStack {
-                Text(model.multipointBusy ? "Sending…" : "Switching and fixing are experimental")
-                    .font(.system(size: 11))
-                    .foregroundColor(palette.secondary.opacity(0.7))
-                Spacer()
-                Button(action: copyMultipointDiagnostics) {
-                    Text("Copy diagnostics")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(palette.accentText)
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-        }
+    private var diagnosticsButton: some View {
+        Button("Copy diagnostics", action: copyMultipointDiagnostics)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(palette.accentText)
+            .buttonStyle(PlainButtonStyle())
+            .disabled(model.diagnosticsToCopy.isEmpty)
     }
 
     private func sectionLabel(_ text: String) -> some View {
@@ -573,7 +571,7 @@ struct ContentView: View {
     private func copyMultipointDiagnostics() {
         let header = "\(model.deviceName) · fw \(model.firmware) · \(model.protocolVersion)\n"
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(header + model.multipointDiagnostics, forType: .string)
+        NSPasteboard.general.setString(header + model.diagnosticsToCopy, forType: .string)
     }
 
     // ⋯ About / device info popover.
@@ -597,6 +595,9 @@ struct ContentView: View {
             if !model.firmware.isEmpty { aboutRow("Firmware", model.firmware) }
             if !model.protocolVersion.isEmpty { aboutRow("Protocol", model.protocolVersion) }
             if !model.deviceMac.isEmpty { aboutRow("Bluetooth", model.deviceMac) }
+            Divider().background(palette.cardStroke).padding(.vertical, 10)
+            diagnosticsButton
+                .frame(maxWidth: .infinity, alignment: .trailing)
             sectionLabel("Appearance")
                 .padding(.top, 12)
                 .padding(.bottom, 8)

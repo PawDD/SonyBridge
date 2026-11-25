@@ -1178,6 +1178,7 @@ bool Headphones::multipointRequiresReconnect() {
 }
 bool Headphones::getMultipointEnabled() { std::lock_guard g(this->_propertyMtx); return this->_multipointEnabled; }
 std::string Headphones::getMultipointDiagnostics() { std::lock_guard g(this->_propertyMtx); return this->_multipointDiagnostics + this->_multipointWriteLog; }
+bool Headphones::multipointConfirmationAttempted() { std::lock_guard g(this->_propertyMtx); return this->_multipointConfirmationAttempted; }
 
 void Headphones::setMultipoint(bool enabled)
 {
@@ -1185,6 +1186,7 @@ void Headphones::setMultipoint(bool enabled)
     bool xm4c;
     {
         std::lock_guard guard(this->_propertyMtx);
+        this->_multipointConfirmationAttempted = false;
         if (!this->_hasMultipointSetting) throw RecoverableException("This headset doesn't report a multipoint setting.");
         slot = this->_multipointSlot;
         xm4c = this->_isWh1000Xm4c();
@@ -1198,6 +1200,12 @@ void Headphones::setMultipoint(bool enabled)
             this->_multipointWriteLog += line + "\n";
         };
         try {
+            // Enable fixed-message alerts for this control session before a setting that
+            // requires an alert/confirmation exchange. Without this, the SET may be ACKed
+            // while no alert is delivered to the host.
+            record("W T1 94 00 00 (enable fixed-message alerts)");
+            this->_conn.sendCommand({(char)V2Command::ALERT_SET_STATUS, 0x00, 0x00});
+            record("fixed-message alert setup acknowledged");
             record("W T1 " + hexString(command) + " (waiting for headset alert)");
             auto alert = this->_conn.sendCommandAndReadResponse(command, V2Command::ALERT_NTFY_PARAM, 0x00);
             record("R T1 " + hexString(alert));
@@ -1208,6 +1216,10 @@ void Headphones::setMultipoint(bool enabled)
             if (alert != expected) throw RecoverableException("Unexpected multipoint alert; confirmation was not sent.");
             Buffer confirmation = {(char)V2Command::ALERT_SET_PARAM, alert[1], alert[2], 0x01};
             record("W T1 " + hexString(confirmation));
+            {
+                std::lock_guard guard(this->_propertyMtx);
+                this->_multipointConfirmationAttempted = true;
+            }
             this->_conn.sendCommand(confirmation);
             record("multipoint confirmation acknowledged; reconnect and fresh read required");
         } catch (const std::exception& exc) {

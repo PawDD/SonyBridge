@@ -100,6 +100,32 @@ final class HeadphonesModel: ObservableObject {
     @Published var multipointRequiresReconnect = false
     @Published var multipointEnabled = false
     @Published var multipointDiagnostics = ""
+    private static let multipointAttemptURL: URL = {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("SonyBridge", isDirectory: true)
+            .appendingPathComponent("last-multipoint-attempt.txt")
+    }()
+    @Published private(set) var lastMultipointAttempt =
+        (try? String(contentsOf: HeadphonesModel.multipointAttemptURL, encoding: .utf8)) ?? ""
+
+    var diagnosticsToCopy: String {
+        [lastMultipointAttempt, multipointDiagnostics].filter { !$0.isEmpty }.joined(separator: "\nCurrent session:\n")
+    }
+
+    private func saveMultipointAttempt(expected: Bool, error: String?) {
+        lastMultipointAttempt = "\(Date().ISO8601Format()) · requested multipoint: \(expected)\n"
+            + "\(deviceName) · fw \(firmware) · \(protocolVersion)\n"
+            + bridge.multipointDiagnostics + "\nResult: \(error ?? "confirmation acknowledged")\n"
+        do {
+            let url = Self.multipointAttemptURL
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                                   attributes: [.posixPermissions: 0o700])
+            try lastMultipointAttempt.write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            NSLog("SonyBridge: could not save local multipoint diagnostics: %@", error.localizedDescription)
+        }
+    }
     @Published var refreshingMultipoint = false
     @Published var multipointBusy = false
 
@@ -134,12 +160,14 @@ final class HeadphonesModel: ObservableObject {
     func connect() {
         guard !connecting, !connected else { return }
         connectionInfoGeneration += 1
+        let generation = connectionInfoGeneration
         connecting = true
         errorMessage = nil
         connectionNotice = nil
         // Defer so SwiftUI can render the "Connecting…" state before the modal picker blocks the main thread.
         DispatchQueue.main.async {
             self.bridge.scanAndConnect { ok, error in
+                guard self.connectionInfoGeneration == generation else { return }
                 self.connecting = false
                 if ok {
                     self.s2cAutoDisablePending = true
@@ -313,8 +341,11 @@ final class HeadphonesModel: ObservableObject {
         stopWatchingConnection()
         errorMessage = nil
         bridge.setMultipoint(on) { ok, error in
+            self.saveMultipointAttempt(expected: on, error: ok ? nil : (error ?? "Change not confirmed"))
             if needsReconnect {
-                if ok {
+                // A restarting headset can close before the confirmation ACK arrives.
+                // Recover by reading the new session, never by resending the setting.
+                if ok || self.bridge.multipointConfirmationAttempted {
                     self.reconnectAfterMultipointChange(address: address, expected: on)
                 } else {
                     self.disconnect()
@@ -530,8 +561,8 @@ final class HeadphonesModel: ObservableObject {
                     self.errorMessage = nil
                     self.connectionNotice = "Control connection closed. To use SonyBridge, close Sound Connect on your phone and reconnect."
                 } else {
-                    self.connectionNotice = nil
-                    self.errorMessage = "The Bluetooth connection closed."
+                    self.errorMessage = nil
+                    self.connectionNotice = "Bluetooth disconnected. If the headset is off, turn it on and reconnect."
                 }
                 self.stopWatchingConnection()
                 self.stopDynamicPolling()

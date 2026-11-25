@@ -15,3 +15,14 @@ clang++ -std=c++20 -fobjc-arc -pthread -I"$client_dir" -I"$client_dir/macos" \
 preset_binary="${TMPDIR:-/tmp}/sonybridge-eq-preset-options-tests"
 swiftc "$client_dir/macos/EqualizerPresets.swift" "$client_dir/tests/EQPresetOptionsTests.swift" -o "$preset_binary"
 "$preset_binary"
+
+# Manual reconnect must drain old-session work and respect cancellation.
+lifecycle_binary="${TMPDIR:-/tmp}/sonybridge-mac-connection-lifecycle-tests"
+clang++ -std=c++20 -fobjc-arc -pthread -I"$client_dir" -I"$client_dir/macos" \
+    "$client_dir/tests/MacConnectionLifecycleTests.mm" \
+    "$client_dir/macos/HeadphonesBridge.mm" "$client_dir/macos/MacOSBluetoothConnector.mm" \
+    "$client_dir/Headphones.cpp" "$client_dir/BluetoothWrapper.cpp" \
+    "$client_dir/ByteMagic.cpp" "$client_dir/CommandSerializer.cpp" \
+    -framework IOBluetooth -framework IOBluetoothUI -framework Cocoa \
+    -o "$lifecycle_binary"
+"$lifecycle_binary"

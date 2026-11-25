@@ -31,9 +31,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Check approved installer SDK
+        id: sdk
+        shell: bash
+        run: |
+          expected=$(cat Client/macos/required-sdk.txt)
+          actual=$(xcrun --sdk macosx --show-sdk-version)
+          if [ "$actual" = "$expected" ]; then
+            echo 'compatible=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'compatible=false' >> "$GITHUB_OUTPUT"
+            echo "::notice::Installer skipped: approved SDK $expected, runner SDK $actual."
+            echo "Installer not built: requires SDK $expected; runner has $actual. Regression tests run separately. Use the approved full-Xcode source build for release packaging." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Build and verify universal installer from current source
+        if: steps.sdk.outputs.compatible == 'true'
         run: sh Client/macos/build-release.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.sdk.outputs.compatible == 'true'
         with:
           name: SonyBridge-XM4C-macOS
           if-no-files-found: error

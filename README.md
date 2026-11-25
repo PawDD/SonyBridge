@@ -38,13 +38,15 @@ The maintainer has tested the application locally and confirmed installation fro
 
 **WH-1000XM4C supports one active control app at a time.** Connecting Sound Connect on Android disconnects SonyBridge's control session on Mac, and vice versa. Bluetooth audio connections remain active. This behaviour was confirmed on XM4C firmware 1.1.2.
 
-To control the headset from SonyBridge, close Sound Connect on your phone and connect SonyBridge. To return to the phone app, choose **Release control to phone** in SonyBridge, then open Sound Connect. Android can automatically launch Sound Connect when the headset connects, which can also transfer control away from SonyBridge.
+Connect the app you want to use: connecting SonyBridge or Sound Connect transfers the control session from the other app. The power button at the top of SonyBridge disconnects its control session manually. Android can automatically launch Sound Connect when the headset connects, which can also transfer control away from SonyBridge.
+
+With multipoint disabled, the headset has only one Bluetooth device connection. Disconnect that device before connecting the other one; opening a control app alone does not free the occupied Bluetooth slot.
 
 SonyBridge reports a closed control connection separately from a lost system Bluetooth connection. A control-link close event does not identify its cause, so the app does not attribute every closure to Sound Connect.
 
 ## Download and install on macOS
 
-**Version 0.4.1 is a recommended maintenance update for WH-1000XM4C users.** It improves multipoint switching, reconnection and the connected-device display. See the [changelog](CHANGELOG.md).
+**Version 0.4.2 supersedes 0.4.1.** It restores the approved macOS SDK 27.2 appearance, fixes multipoint alert setup and improves recovery when the headset restarts before its final acknowledgement. It also simplifies the connected-device panel. See the [changelog](CHANGELOG.md).
 
 Download **SonyBridge XM4C.dmg** from [this fork's latest release](https://github.com/PawDD/SonyBridge/releases/latest). Use the current macOS release. The filename stays simple; the source revision is recorded inside the app. The upstream Homebrew cask and upstream downloads do not contain this fork's changes.
 
@@ -55,7 +57,7 @@ Download **SonyBridge XM4C.dmg** from [this fork's latest release](https://githu
 
 No Terminal commands or Homebrew are needed. Existing preferences may survive removal of an earlier app. Hardware validation is limited to the configurations and features documented above.
 
-For builds newer than the downloadable release, [macOS Actions](https://github.com/PawDD/SonyBridge/actions/workflows/xcodebuild.yml) also supplies the DMG and SHA-256 checksum as CI artifacts.
+The macOS installer requires **Xcode with macOS SDK 27.2**. The build rejects a different SDK. [macOS Actions](https://github.com/PawDD/SonyBridge/actions/workflows/xcodebuild.yml) runs regression tests; installer generation and artifact upload are skipped when the runner does not have that SDK. The 0.4.2 installer is prepared locally from source with the approved Xcode toolchain, not from the older runner SDK.
 
 ## Build and test
 
@@ -63,7 +65,7 @@ Pair/connect the headphones in macOS Bluetooth settings before connecting in Son
 
 ### macOS
 
-Use a current full Xcode installation and macOS 12 or later:
+Use full Xcode with **macOS SDK 27.2**. The application targets macOS 12 or later:
 
 ```sh
 git clone --recurse-submodules https://github.com/PawDD/SonyBridge.git
@@ -72,7 +74,7 @@ sh Client/tests/run-macos.sh
 open Client/macos/SonyHeadphonesClient.xcodeproj
 ```
 
-Select the `SonyHeadphonesClient` scheme and build/run. To build and package the current source revision using the same procedure as CI, run `sh Client/macos/build-release.sh` from a clean checkout with full Xcode selected. CI builds a universal app for Apple Silicon and Intel, then runs `Client/macos/package-dmg.py` to create **SonyBridge XM4C.dmg** and its SHA-256 checksum. The installer includes license notices and instructions in English and Polish. Packaging checks both architectures, removes debugger entitlement from its ad-hoc signature, verifies unchanged executable code/data and checks the mounted DMG. It does not change the application version. CI does not automatically publish a release.
+Select the `SonyHeadphonesClient` scheme and build/run. To build and package the current source revision using the same procedure as CI, run `sh Client/macos/build-release.sh` from a clean checkout with full Xcode selected. The release script builds a universal app for Apple Silicon and Intel, then runs `Client/macos/package-dmg.py` to create **SonyBridge XM4C.dmg** and its SHA-256 checksum. The installer includes license notices and instructions in English and Polish. Packaging checks both architectures, removes debugger entitlement from its ad-hoc signature, verifies unchanged executable code/data and checks the mounted DMG. It does not change the application version. CI only builds an installer when its SDK matches the pin, and does not automatically publish a release.
 
 ### Windows / Linux
 
