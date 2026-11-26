@@ -133,7 +133,7 @@ import SwiftUI
         menu.removeAllItems()
         if model.connected {
             menu.addItem(disabledItem(model.deviceName))
-            if model.controlSessionChecking {
+            if model.shouldShowControlSessionChecking {
                 menu.addItem(disabledItem("Checking headset response…"))
             }
             let release = actionItem("Release Control to Phone", #selector(releaseControl))
@@ -144,14 +144,14 @@ import SwiftUI
                     let pinned = model.playbackPinnedToThisMac
                     let pin = actionItem(pinned ? "Playback Fixed to This Mac" : "Pin Playback to This Mac", #selector(pinToThisMac))
                     pin.state = pinned ? .on : .off
-                    pin.isEnabled = !pinned && !model.multipointBusy && !model.controlSessionChecking
+                    pin.isEnabled = !pinned && !model.multipointBusy && !model.shouldShowControlSessionChecking
                     menu.addItem(pin)
                 } else {
                     menu.addItem(disabledItem("This Mac isn't a connected device"))
                 }
                 if model.playbackPinned {
                     let unfix = actionItem("Unfix Playback", #selector(unfixPlayback))
-                    unfix.isEnabled = !model.multipointBusy && !model.controlSessionChecking
+                    unfix.isEnabled = !model.multipointBusy && !model.shouldShowControlSessionChecking
                     menu.addItem(unfix)
                 }
             }

@@ -29,6 +29,9 @@ final class HeadphonesModel: ObservableObject {
     @Published var connected = false
     @Published var connecting = false
     @Published private(set) var controlSessionChecking = false
+    var shouldShowControlSessionChecking: Bool {
+        controlSessionChecking
+    }
     private var dynamicRefreshInFlight = false
     private var statusRefreshInFlight = false
     @Published var deviceName = ""
@@ -193,7 +196,7 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func refreshStatus() {
-        guard connected, !statusRefreshInFlight else { return }
+        guard connected, !controlSessionChecking, !statusRefreshInFlight else { return }
         statusRefreshInFlight = true
         let generation = connectionInfoGeneration
         bridge.refreshStatus { finished in
@@ -563,13 +566,17 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func disconnect() {
+        closeControlSession(keepDeviceView: false)
+    }
+
+    private func closeControlSession(keepDeviceView: Bool) {
         connectionNotice = nil
         multipointReconnectWork?.cancel()
         multipointReconnectWork = nil
         multipointExpectedAfterReconnect = nil
         connecting = false
         multipointBusy = false
-        controlSessionChecking = false
+        controlSessionChecking = keepDeviceView
         dynamicRefreshInFlight = false
         statusRefreshInFlight = false
         refreshingMultipoint = false
@@ -587,6 +594,7 @@ final class HeadphonesModel: ObservableObject {
         pendingEqSelection = nil
         s2cAutoDisablePending = false
         bridge.disconnect()
+        if keepDeviceView { return }
         connected = false
         deviceName = ""
         syncMultipointFromBridge()
@@ -597,6 +605,18 @@ final class HeadphonesModel: ObservableObject {
     private func finishControlSession(unresponsive: Bool) {
         let bluetoothStillConnected = bridge.systemBluetoothConnected
         let changingMultipoint = multipointBusy
+        // A phone takeover can leave macOS Bluetooth audio connected while Sony's
+        // control channel stops replying. Treat that timeout like a channel close
+        // and make one recovery attempt after the same short handoff delay.
+        if !changingMultipoint, !deviceMac.isEmpty,
+           (!unresponsive || bluetoothStillConnected) {
+            NSLog("SonyBridge: attempting startup control recovery (system Bluetooth connected: %@)",
+                  bluetoothStillConnected ? "yes" : "no")
+            recoverStartupSession()
+            return
+        }
+        NSLog("SonyBridge: control session ended without startup recovery (unresponsive: %@, system Bluetooth connected: %@)",
+              unresponsive ? "yes" : "no", bluetoothStillConnected ? "yes" : "no")
         disconnect()
         errorMessage = nil
         if changingMultipoint {
@@ -608,8 +628,33 @@ final class HeadphonesModel: ObservableObject {
         } else {
             connectionNotice = "Bluetooth disconnected. Turn on the headset and press Connect."
         }
-        // Never automatically compete with another controller. Connect is a fresh,
-        // user-requested handshake; no setting or playback command is replayed.
+    }
+
+    private func recoverStartupSession() {
+        let address = deviceMac
+        closeControlSession(keepDeviceView: true)
+        errorMessage = nil
+        let generation = connectionInfoGeneration
+        // The previously successful takeover recovery waited roughly 250 ms after the
+        // headset closed the RFCOMM channel. Immediate reconnects race the phone's handoff.
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            guard let self, self.connectionInfoGeneration == generation else { return }
+            self.bridge.reconnect(toAddress: address) { ok, error in
+                guard self.connectionInfoGeneration == generation else { return }
+                NSLog("SonyBridge: startup control recovery %@", ok ? "succeeded" : "failed")
+                if ok {
+                    self.syncFromBridge()
+                    self.controlSessionChecking = false
+                    self.startWatchingConnection()
+                    self.refreshStatus()
+                    self.startDynamicPolling()
+                } else {
+                    self.disconnect()
+                    self.connectionNotice = "Could not restore headset control. Press Connect to try again."
+                    self.errorMessage = error
+                }
+            }
+        }
     }
 
     private func startWatchingConnection() {

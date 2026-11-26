@@ -100,9 +100,9 @@ struct ContentView: View {
     @ViewBuilder
     private var primaryCards: some View {
         deviceHero
-        ambientCard.disabled(model.controlSessionChecking)
+        ambientCard.disabled(model.shouldShowControlSessionChecking)
         if model.mode == .ambientSound {
-            ambientLevelCard.disabled(model.controlSessionChecking)
+            ambientLevelCard.disabled(model.shouldShowControlSessionChecking)
         }
     }
 
@@ -126,7 +126,7 @@ struct ContentView: View {
                     .font(.system(size: 12))
                     .foregroundColor(palette.danger)
             }
-        }.disabled(model.controlSessionChecking)
+        }.disabled(model.shouldShowControlSessionChecking)
     }
 
     private var deviceHero: some View {
@@ -157,7 +157,7 @@ struct ContentView: View {
                 .foregroundColor(palette.primary)
 
             StatusChips(model: model)
-            if model.controlSessionChecking {
+            if model.shouldShowControlSessionChecking {
                 Text("Checking headset response… Controls are paused.")
                     .font(.system(size: 12))
                     .foregroundColor(palette.secondary)

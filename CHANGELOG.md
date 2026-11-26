@@ -4,7 +4,7 @@
 
 - Check control-session responsiveness using matched basic inquiry replies rather than the open RFCOMM channel alone. Pause controls while checking; release the session after three consecutive failed heartbeat attempts. A successful basic reply clears the failure count, and optional feature failures do not disconnect the session.
 - Prevent overlapping periodic refreshes, cancel queued work from disconnected sessions, discard their late results, and reset pending UI operations on disconnect.
-- Restore an explicit “Release control to phone” action in the window, quick controls and menu. Resuming uses a fresh connection to the same headset; it never automatically competes with Sound Connect or replays failed settings.
+- Restore an explicit “Release control to phone” action in the window, quick controls and menu. Resuming uses a fresh connection to the same headset. After a control-channel close, or a response timeout while Bluetooth remains connected, try once to restore control. Failed settings are not replayed.
 - Retry unavailable v2 device lists less frequently while basic control remains responsive. Connection guidance applies to Android and iPhone.
 
 Covered by offline protocol/session-health and macOS queue lifecycle tests. The new recovery flow still requires hardware checks with Android and iPhone; no iOS handover compatibility claim is made.

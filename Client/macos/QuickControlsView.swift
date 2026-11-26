@@ -20,12 +20,12 @@ struct QuickControlsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             if model.connected {
-                if model.controlSessionChecking {
+                if model.shouldShowControlSessionChecking {
                     Text("Checking headset response… Controls are paused.")
                         .font(.system(size: 11))
                         .foregroundColor(palette.secondary)
                 }
-                connectedContent.disabled(model.multipointBusy || model.controlSessionChecking)
+                connectedContent.disabled(model.multipointBusy || model.shouldShowControlSessionChecking)
                 Button("Release control to phone", action: model.releaseControlToPhone)
                     .font(.system(size: 12))
                     .disabled(model.multipointBusy)
