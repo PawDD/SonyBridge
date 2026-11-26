@@ -5,6 +5,7 @@
 
 import Foundation
 import Combine
+import SwiftUI
 
 private let keepSpeakToChatOffKey = "KeepSpeakToChatOffOnConnect"
 
@@ -485,27 +486,26 @@ final class HeadphonesModel: ObservableObject {
             pendingEqSelection = preset
             return
         }
-        if preset == 0xA0 {
-            eqPreset = 0xA0
-            applyCustomEq()
-            return
-        }
-        eqPreset = preset
         errorMessage = nil
         equalizerSelecting = true
         bridge.setEqualizerPreset(preset) { ok, error in
             self.equalizerSelecting = false
             if !ok {
-                self.eqPreset = self.bridge.eqPreset
+                withAnimation(.easeInOut(duration: 0.35)) {
+                    self.eqPreset = self.bridge.eqPreset
+                    self.clearBass = self.bridge.clearBass
+                    self.eqBands = self.readEqBands()
+                }
                 if let error = error { self.errorMessage = error }
                 return
             }
             // The bridge re-reads the EQ after the write, so this picks up the band values that belong to
-            // the preset just selected - in particular the custom curve the device restores for Manual,
-            // which is what the sliders below the chips show.
-            self.eqPreset = self.bridge.eqPreset
-            self.clearBass = self.bridge.clearBass
-            self.eqBands = self.readEqBands()
+            // the preset just selected, including the curve stored for Manual.
+            withAnimation(.easeInOut(duration: 0.35)) {
+                self.eqPreset = self.bridge.eqPreset
+                self.clearBass = self.bridge.clearBass
+                self.eqBands = self.readEqBands()
+            }
         }
     }
 

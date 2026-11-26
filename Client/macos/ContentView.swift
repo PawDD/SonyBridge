@@ -233,7 +233,7 @@ struct ContentView: View {
                         .disabled(model.equalizerSelecting)
                 }
             }
-            if EQPresets.isEditable(model.eqPreset) && !model.equalizerSelecting {
+            if EQPresets.isEditable(model.eqPreset) {
                 Divider().background(palette.cardStroke)
                 let labels = model.tenBandEqualizer ? tenBandEqLabels : eqBandLabels
                 ForEach(0..<min(model.eqBands.count, labels.count), id: \.self) { i in
@@ -241,12 +241,14 @@ struct ContentView: View {
                         get: { Double(model.eqBands[i]) },
                         set: { model.eqBands[i] = Int($0.rounded()); model.applyCustomEq() }
                     ), display: model.eqBands[i], raw: model.tenBandEqualizer)
+                        .disabled(model.equalizerSelecting)
                 }
                 if !model.tenBandEqualizer {
                     eqBandRow("Bass", value: Binding(
                         get: { Double(model.clearBass) },
                         set: { model.clearBass = Int($0.rounded()); model.applyCustomEq() }
                     ), display: model.clearBass, accent: true)
+                        .disabled(model.equalizerSelecting)
                 }
             }
         }

@@ -340,8 +340,13 @@ struct EQPreview: View {
 // Levels are 0...1, spread evenly left to right. Horizontal tangents at each band keep the curve
 // from overshooting between them.
 private struct EQCurve: Shape {
-    let levels: [Double]
+    var levels: [Double]
     let closed: Bool
+
+    var animatableData: EQVector {
+        get { EQVector(values: levels) }
+        set { levels = newValue.values }
+    }
 
     func path(in rect: CGRect) -> Path {
         var path = Path()
@@ -364,6 +369,32 @@ private struct EQCurve: Shape {
             path.closeSubpath()
         }
         return path
+    }
+}
+
+private struct EQVector: VectorArithmetic {
+    var values: [Double]
+
+    static var zero: EQVector { EQVector(values: []) }
+
+    var magnitudeSquared: Double { values.reduce(0) { $0 + $1 * $1 } }
+
+    mutating func scale(by rhs: Double) {
+        values = values.map { $0 * rhs }
+    }
+
+    static func + (lhs: EQVector, rhs: EQVector) -> EQVector {
+        let count = max(lhs.values.count, rhs.values.count)
+        return EQVector(values: (0..<count).map { i in
+            (i < lhs.values.count ? lhs.values[i] : 0) + (i < rhs.values.count ? rhs.values[i] : 0)
+        })
+    }
+
+    static func - (lhs: EQVector, rhs: EQVector) -> EQVector {
+        let count = max(lhs.values.count, rhs.values.count)
+        return EQVector(values: (0..<count).map { i in
+            (i < lhs.values.count ? lhs.values[i] : 0) - (i < rhs.values.count ? rhs.values[i] : 0)
+        })
     }
 }
 
