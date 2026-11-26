@@ -113,8 +113,9 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
     windReduction:(BOOL)windReduction
        completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 
-// Runs the init handshake (once) then reads battery + equalizer on a background thread; completion on main.
-- (void)refreshStatusWithCompletion:(void (^)(void))completion;
+// Reads device state and optional capabilities after initialization; completion on main.
+// Publishes partial results; finished is YES only after the final optional probes.
+- (void)refreshStatusWithCompletion:(void (^)(BOOL finished))completion;
 
 // Pushes an equalizer preset (raw EQ_PRESET byte) to the device; completion on main.
 - (void)setEqualizerPreset:(NSInteger)preset completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
@@ -133,9 +134,11 @@ typedef NS_ENUM(NSInteger, SHCAmbientMode) {
 - (void)setAdaptiveVolume:(BOOL)enabled completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 - (void)setMultipoint:(BOOL)enabled completion:(void (^)(BOOL ok, NSString * _Nullable error))completion;
 
-// Re-reads the fast-changing state (ambient/NC, level, EQ, DSEE) so changes made with the headphone's
-// own button show up in the app. Called on a timer while connected.
-- (void)refreshDynamicWithCompletion:(void (^)(void))completion;
+// A basic read is also the heartbeat. Battery is a fallback when ANC does not reply.
+// Three consecutive attempts without a matched reply mark the session unresponsive.
+// Optional multipoint/capability failures do not count. Completion is on main;
+// results from a disconnected/replaced session are discarded.
+- (void)refreshDynamicWithCompletion:(void (^)(BOOL responsive, BOOL sessionLost))completion;
 
 // Re-reads the paired-device list, pinned state and multipoint switch (GETs only); completion on main.
 - (void)refreshMultipointWithCompletion:(void (^)(void))completion;

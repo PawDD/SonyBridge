@@ -100,31 +100,33 @@ struct ContentView: View {
     @ViewBuilder
     private var primaryCards: some View {
         deviceHero
-        ambientCard
+        ambientCard.disabled(model.controlSessionChecking)
         if model.mode == .ambientSound {
-            ambientLevelCard
+            ambientLevelCard.disabled(model.controlSessionChecking)
         }
     }
 
     @ViewBuilder
     private var secondaryCards: some View {
-        if model.supportsEqualizer {
-            equalizerCard
-        }
-        if model.supportsDsee {
-            dseeCard
-        }
-        if model.hasConnectionQuality || model.hasAdaptiveVolume || model.hasSpeakToChat || model.hasAutoPowerOff {
-            settingsCard
-        }
-        if model.connected && (model.protocolVersion == "v2" || model.hasPairedDevices || model.hasPlaybackPinState) {
-            devicesCard
-        }
-        if let error = model.errorMessage {
-            Text(error)
-                .font(.system(size: 12))
-                .foregroundColor(palette.danger)
-        }
+        Group {
+            if model.supportsEqualizer {
+                equalizerCard
+            }
+            if model.supportsDsee {
+                dseeCard
+            }
+            if model.hasConnectionQuality || model.hasAdaptiveVolume || model.hasSpeakToChat || model.hasAutoPowerOff {
+                settingsCard
+            }
+            if model.connected && (model.protocolVersion == "v2" || model.hasPairedDevices || model.hasPlaybackPinState) {
+                devicesCard
+            }
+            if let error = model.errorMessage {
+                Text(error)
+                    .font(.system(size: 12))
+                    .foregroundColor(palette.danger)
+            }
+        }.disabled(model.controlSessionChecking)
     }
 
     private var deviceHero: some View {
@@ -155,6 +157,16 @@ struct ContentView: View {
                 .foregroundColor(palette.primary)
 
             StatusChips(model: model)
+            if model.controlSessionChecking {
+                Text("Checking headset response… Controls are paused.")
+                    .font(.system(size: 12))
+                    .foregroundColor(palette.secondary)
+            }
+            Button("Release control to phone", action: model.releaseControlToPhone)
+                .font(.system(size: 12))
+                .foregroundColor(palette.accentText)
+                .buttonStyle(PlainButtonStyle())
+                .help("Closes SonyBridge's control session so you can use Sound Connect on your phone. Bluetooth audio can continue.")
         }
         .padding(.bottom, 4)
     }

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Check control-session responsiveness using matched basic inquiry replies rather than the open RFCOMM channel alone. Pause controls while checking; release the session after three consecutive failed heartbeat attempts. A successful basic reply clears the failure count, and optional feature failures do not disconnect the session.
+- Prevent overlapping periodic refreshes, cancel queued work from disconnected sessions, discard their late results, and reset pending UI operations on disconnect.
+- Restore an explicit “Release control to phone” action in the window, quick controls and menu. Resuming uses a fresh connection to the same headset; it never automatically competes with Sound Connect or replays failed settings.
+- Retry unavailable v2 device lists less frequently while basic control remains responsive. Connection guidance applies to Android and iPhone.
+
+Covered by offline protocol/session-health and macOS queue lifecycle tests. The new recovery flow still requires hardware checks with Android and iPhone; no iOS handover compatibility claim is made.
+
 ## 0.4.2 — 2026-11-25
 
 Maintenance update superseding 0.4.1.

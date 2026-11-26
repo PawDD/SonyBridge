@@ -2,6 +2,7 @@
 #include "CommandSerializer.h"
 #include "Exceptions.h"
 #include "Headphones.h"
+#include "ControlSessionHealth.h"
 
 #include <algorithm>
 #include <cstring>
@@ -189,6 +190,55 @@ void expectRecoverable(Fn&& fn, const char* message)
 
 int main()
 {
+    {
+        // A channel may remain open while a competing controller makes all
+        // inquiries go unanswered. ACKs and unrelated notifications are not proof
+        // that our requested state was returned.
+        auto connector = std::make_unique<FakeV2Connector>();
+        auto *wire = connector.get();
+        BluetoothWrapper bt(std::move(connector));
+        Headphones hp(bt);
+        ControlSessionHealth health;
+        using State = ControlSessionHealth::State;
+        wire->reply = [](const Buffer&) { return bytes({0x23, 0, 80, 0}); };
+        hp.requestBattery();
+        require(bt.successfulResponseCount() == 1 && hp.getBatteryLevel() == 80,
+            "a matched basic reply must be observed");
+        auto count = bt.successfulResponseCount();
+        hp.getBatteryLevel();
+        require(bt.successfulResponseCount() == count, "cached battery must not prove session health");
+
+        // Optional multipoint failure does not feed the health policy.
+        wire->reply = nullptr;
+        hp.requestMultipoint();
+        require(health.record(true) == State::Responsive, "optional feature failure killed a live session");
+        for (int attempt = 1; attempt <= 3; ++attempt) {
+            count = bt.successfulResponseCount();
+            // Battery's layout probes catch errors and return normally. A return
+            // without a matched response must still count as heartbeat failure.
+            hp.requestBattery();
+            require(bt.isConnected(), "test must simulate a physically open silent channel");
+            auto state = health.record(bt.successfulResponseCount() != count);
+            require(state == (attempt < 3 ? State::Checking : State::Unresponsive),
+                "silent open session was not classified correctly");
+        }
+        health.reset();
+        require(health.record(false) == State::Checking, "new session inherited old failures");
+        wire->reply = [](const Buffer&) { return bytes({0x23, 0, 79, 0}); };
+        count = bt.successfulResponseCount();
+        hp.requestBattery();
+        require(health.record(bt.successfulResponseCount() != count) == State::Responsive,
+            "basic battery fallback must recover an unsupported ANC heartbeat");
+        require(health.record(false) == State::Checking && health.record(false) == State::Checking,
+            "successful reply did not reset the consecutive-failure budget");
+
+        // Same response ID with a different subtype is just an unrelated frame.
+        count = bt.successfulResponseCount();
+        wire->reply = [](const Buffer&) { return bytes({0x67, 0x19, 1, 1, 0, 0, 1}); };
+        try { bt.sendCommandAndReadResponse(bytes({0x66, 0x17}), 0x67, 0x17); }
+        catch (const std::exception&) {}
+        require(bt.successfulResponseCount() == count, "unrelated notification revived a dead session");
+    }
 	auto fake = std::make_unique<FakeV1Connector>();
 	auto* observed = fake.get();
 	BluetoothWrapper bluetooth(std::move(fake));

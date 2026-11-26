@@ -6,6 +6,7 @@
 @interface HeadphonesBridge (LifecycleTests)
 - (void)connectDevice:(id)device completion:(void (^)(BOOL, NSString *))completion;
 - (void)openDevice:(id)device completion:(void (^)(BOOL, NSString *))completion;
+- (void)enqueueSessionWork:(dispatch_block_t)work;
 @end
 
 @interface LifecycleBridge : HeadphonesBridge
@@ -26,6 +27,22 @@ static void require(bool value, const char *message) {
 
 int main() {
     @autoreleasepool {
+        {
+            HeadphonesBridge *bridge = [HeadphonesBridge new];
+            dispatch_queue_t queue = (dispatch_queue_t)[bridge valueForKey:@"cmdQueue"];
+            dispatch_semaphore_t release = dispatch_semaphore_create(0);
+            dispatch_async(queue, ^{ dispatch_semaphore_wait(release, DISPATCH_TIME_FOREVER); });
+            __block BOOL staleCommandRan = NO;
+            [bridge enqueueSessionWork:^{ staleCommandRan = YES; }];
+            [bridge disconnect];
+            dispatch_semaphore_signal(release);
+            dispatch_sync(queue, ^{});
+            require(!staleCommandRan, "disconnected session replayed queued work");
+            __block BOOL freshCommandRan = NO;
+            [bridge enqueueSessionWork:^{ freshCommandRan = YES; }];
+            dispatch_sync(queue, ^{});
+            require(freshCommandRan, "disconnect permanently disabled fresh session work");
+        }
         for (bool cancel : {false, true}) {
             LifecycleBridge *bridge = [LifecycleBridge new];
             // Queue old-session work without opening any real Bluetooth channel.

@@ -14,6 +14,7 @@ BluetoothWrapper::BluetoothWrapper(BluetoothWrapper&& other) noexcept
 {
 	this->_connector.swap(other._connector);
 	this->_seqNumber = other._seqNumber;
+	this->_successfulResponses = other._successfulResponses.load();
 	this->_leftoverBytes = std::move(other._leftoverBytes);
 }
 
@@ -24,6 +25,7 @@ BluetoothWrapper& BluetoothWrapper::operator=(BluetoothWrapper&& other) noexcept
 
 	this->_connector.swap(other._connector);
 	this->_seqNumber = other._seqNumber;
+	this->_successfulResponses = other._successfulResponses.load();
 	this->_leftoverBytes = std::move(other._leftoverBytes);
 
 	return *this;
@@ -102,6 +104,7 @@ Buffer BluetoothWrapper::sendCommandAndReadResponse(const std::vector<char>& byt
 			&& (unsigned char)msg.payload[0] == retCommandId
 			&& (retSubType < 0 || (msg.payload.size() >= 2 && (unsigned char)msg.payload[1] == retSubType)))
 		{
+			++this->_successfulResponses;
 			return msg.payload;
 		}
 	}

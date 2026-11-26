@@ -133,19 +133,25 @@ import SwiftUI
         menu.removeAllItems()
         if model.connected {
             menu.addItem(disabledItem(model.deviceName))
+            if model.controlSessionChecking {
+                menu.addItem(disabledItem("Checking headset response…"))
+            }
+            let release = actionItem("Release Control to Phone", #selector(releaseControl))
+            release.isEnabled = !model.multipointBusy
+            menu.addItem(release)
             if model.hasPlaybackPinState {
                 if model.thisMac != nil {
                     let pinned = model.playbackPinnedToThisMac
                     let pin = actionItem(pinned ? "Playback Fixed to This Mac" : "Pin Playback to This Mac", #selector(pinToThisMac))
                     pin.state = pinned ? .on : .off
-                    pin.isEnabled = !pinned && !model.multipointBusy
+                    pin.isEnabled = !pinned && !model.multipointBusy && !model.controlSessionChecking
                     menu.addItem(pin)
                 } else {
                     menu.addItem(disabledItem("This Mac isn't a connected device"))
                 }
                 if model.playbackPinned {
                     let unfix = actionItem("Unfix Playback", #selector(unfixPlayback))
-                    unfix.isEnabled = !model.multipointBusy
+                    unfix.isEnabled = !model.multipointBusy && !model.controlSessionChecking
                     menu.addItem(unfix)
                 }
             }
@@ -156,7 +162,8 @@ import SwiftUI
             }
             refreshMultipointIfIdle()
         } else {
-            menu.addItem(disabledItem("No headphones connected"))
+            menu.addItem(disabledItem("No control connection"))
+            if let notice = model.connectionNotice { menu.addItem(disabledItem(notice)) }
             let connect = actionItem(model.connecting ? "Connecting…" : "Connect Headphones", #selector(connectHeadphones))
             connect.isEnabled = !model.connecting
             menu.addItem(connect)
@@ -166,6 +173,7 @@ import SwiftUI
         menu.addItem(actionItem("Quit SonyBridge", #selector(quit), key: "q"))
     }
 
+    @objc private func releaseControl() { model.releaseControlToPhone() }
     @objc private func pinToThisMac() { model.pinPlaybackToThisMac() }
     @objc private func unfixPlayback() { model.setPlaybackPinned(false) }
     @objc private func openWindow() { Self.openMainWindow() }

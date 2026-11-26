@@ -7,6 +7,8 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <atomic>
+#include <cstdint>
 
 
 //Thread-safety: This class is thread-safe.
@@ -32,6 +34,8 @@ public:
 		DATA_TYPE dataType = DATA_TYPE::DATA_MDR);
 
 	bool isConnected() noexcept;
+	// Counts matched inquiry replies, not ACKs, notifications or cached values.
+	uint64_t successfulResponseCount() const noexcept { return _successfulResponses.load(); }
 	//Try to connect to the headphones
 	void connect(const std::string& addr);
 	void disconnect() noexcept;
@@ -49,6 +53,7 @@ private:
 	std::unique_ptr<IBluetoothConnector> _connector;
 	std::mutex _connectorMtx;
 	unsigned int _seqNumber = 0;
+	std::atomic<uint64_t> _successfulResponses{0};
 	//Bytes read past the current message's END_MARKER in a single recv() call - a recv() can return more
 	//than one framed message back-to-back, so these are replayed on the next _waitForAck() instead of dropped.
 	Buffer _leftoverBytes;

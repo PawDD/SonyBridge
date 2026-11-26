@@ -14,6 +14,7 @@
 #include "BluetoothWrapper.h"
 #include "Headphones.h"
 #include "../WaitForDeviceState.h"
+#include "../ControlSessionHealth.h"
 // RecoverableException comes in transitively via BluetoothWrapper.h -> IBluetoothConnector.h -> Exceptions.h.
 // (Exceptions.h isn't a project file reference, so it can't be #included directly from this directory.)
 
@@ -62,7 +63,8 @@ static NSString *SHCNormalizedAddress(NSString *address) {
     NSString *_deviceName;
     NSString *_deviceMac;
     NSString *_lastMultipointWriteDiagnostics;
-    NSUInteger _connectionGeneration;
+    std::atomic<NSUInteger> _connectionGeneration;
+    ControlSessionHealth _sessionHealth;
     std::atomic_bool _initialized;
     // Only touched inside blocks on _cmdQueue, which is serial.
     unsigned _dynamicTick;
@@ -77,9 +79,20 @@ static NSString *SHCNormalizedAddress(NSString *address) {
         _macConnector = connector.get();
         _bt = std::make_unique<BluetoothWrapper>(std::move(connector));
         _initialized = false;
+        _connectionGeneration = 0;
         _cmdQueue = dispatch_queue_create("com.sonybridge.commands", DISPATCH_QUEUE_SERIAL);
     }
     return self;
+}
+
+// A disconnected session must not leave commands queued for a replacement session.
+// A command already running is interrupted by disconnect's cancelPendingReads;
+// connectDevice's serial-queue barrier drains it before a new channel opens.
+- (void)enqueueSessionWork:(dispatch_block_t)work {
+    NSUInteger generation = _connectionGeneration.load();
+    dispatch_async(_cmdQueue, ^{
+        if (self->_connectionGeneration.load() == generation) work();
+    });
 }
 
 - (BOOL)connected {
@@ -204,14 +217,17 @@ static NSString *SHCNormalizedAddress(NSString *address) {
 - (void)refreshConnectionInfoWithCompletion:(void (^)(BOOL, NSString * _Nullable))completion {
     auto hp = _hp;
     if (!hp || !self.connected) { completion(NO, @"Not connected."); return; }
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         BOOL ok = YES; NSString *error = nil;
         try { hp->requestConnectionQuality(); }
         catch (const std::exception &exc) { ok = NO; error = @(exc.what()); }
         try { hp->requestCodec(); }
         catch (const std::exception &exc) { ok = NO; if (!error) error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(ok, error);
+        });
+    }];
 }
 - (BOOL)hasSpeakToChat { return _hp && _hp->hasSpeakToChat(); }
 - (BOOL)speakToChat { return _hp && _hp->getSpeakToChat(); }
@@ -227,7 +243,7 @@ static NSString *SHCNormalizedAddress(NSString *address) {
     if (!hp || !self.connected || !hp->hasSpeakToChatTiming()) {
         completion(NO, @"Speak-to-Chat timing is unavailable."); return;
     }
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         BOOL ok = YES; NSString *error = nil;
         try {
             hp->setSpeakToChatTimeout((int)option);
@@ -236,8 +252,11 @@ static NSString *SHCNormalizedAddress(NSString *address) {
                 return hp->getSpeakToChatTimeout() == option;
             }, "The headphones did not apply the Speak-to-Chat timeout.");
         } catch (const std::exception &exc) { ok = NO; error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(ok, error);
+        });
+    }];
 }
 - (BOOL)hasAdaptiveVolume { return _hp && _hp->hasAdaptiveVolume(); }
 - (BOOL)adaptiveVolume { return _hp && _hp->getAdaptiveVolume(); }
@@ -336,7 +355,7 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
     // reconnect after another control app takes over. Otherwise an old retained
     // Headphones object can send inquiries through the replacement before its INIT.
     [self disconnect];
-    NSUInteger generation = _connectionGeneration;
+    NSUInteger generation = _connectionGeneration.load();
     dispatch_async(_cmdQueue, ^{
         dispatch_async(dispatch_get_main_queue(), ^{
             if (self->_connectionGeneration != generation) {
@@ -375,7 +394,7 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
     if (!_bt->isConnected()) {
         int status = _macConnector->channelOpenStatus();
         _bt->disconnect();
-        completion(NO, [NSString stringWithFormat:@"Could not open the headset control channel (Bluetooth status %d). Another app may be using it. Close the headphone app on Android and try again; check multipoint connections in macOS Bluetooth.", status]);
+        completion(NO, [NSString stringWithFormat:@"Could not open the headset control channel (Bluetooth status %d). Another app may be using it. Close Sound Connect on your phone (Android or iPhone) and try again; check multipoint connections in macOS Bluetooth.", status]);
         return;
     }
 
@@ -390,8 +409,10 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
     // An open audio/control link is not yet a usable Sony session. Do not start polling or
     // capability probes until the headset has answered the protocol handshake.
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil;
+        self->_sessionHealth.reset();
+        self->_dynamicTick = 0;
         try { hp->initDevice(); }
         catch (const std::exception &exc) {
             error = [NSString stringWithFormat:@"The headset did not complete Sony initialization: %s. Try connecting again.", exc.what()];
@@ -406,7 +427,7 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
             self->_initialized = true;
             completion(YES, nil);
         });
-    });
+    }];
 }
 
 - (void)disconnect {
@@ -418,24 +439,33 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
     _initialized = false;
 }
 
-- (void)refreshStatusWithCompletion:(void (^)(void))completion {
-    if (!_hp || !self.connected || !_initialized.load()) { completion(); return; }
+- (void)refreshStatusWithCompletion:(void (^)(BOOL))completion {
+    if (!_hp || !self.connected || !_initialized.load()) { completion(YES); return; }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         // Every method chooses its command family from the SDP-confirmed protocol version. This is
         // essential for v1: 0x22 powers off an XM4 but requests battery state on v2.
         try { hp->requestMultipoint(); } catch (const std::exception &exc) {}
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(NO);
+        });
         try { hp->requestAmbientState(); } catch (std::exception &exc) {}
         try { hp->requestBattery(); } catch (std::exception &exc) {}
         try { hp->requestEqualizer(); hp->requestEqualizerPresets(); } catch (std::exception &exc) {}
         try { hp->requestDsee(); } catch (std::exception &exc) {}
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(NO);
+        });
 
         // Optional-feature probes can time out on unsupported devices; publish their results last.
         try { hp->probeCapabilities(); } catch (std::exception &exc) {}
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(YES);
+        });
+    }];
 }
 
 - (void)refreshMultipointWithCompletion:(void (^)(void))completion {
@@ -445,10 +475,13 @@ static BOOL SHCLooksLikeSonyHeadset(NSString *name) {
         return;
     }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         try { hp->requestMultipoint(); } catch (std::exception &exc) {}
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion();
+        });
+    }];
 }
 
 static NSString *_Nullable SHCSourceSwitchError(int result) {
@@ -468,7 +501,7 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         return;
     }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil;
         try {
             error = SHCSourceSwitchError(write(hp.get()));
@@ -476,8 +509,11 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
             error = @(exc.what());
         }
         try { hp->requestMultipoint(); } catch (std::exception &exc) {}
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(error == nil, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(error == nil, error);
+        });
+    }];
 }
 
 - (void)switchPlaybackToAddress:(NSString *)address fix:(BOOL)fix completion:(void (^)(BOOL, NSString * _Nullable))completion {
@@ -522,21 +558,28 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     } completion:completion];
 }
 
-- (void)refreshDynamicWithCompletion:(void (^)(void))completion {
-    if (!_hp || !self.connected) { completion(); return; }
+- (void)refreshDynamicWithCompletion:(void (^)(BOOL, BOOL))completion {
+    if (!_hp || !self.connected || !_initialized.load()) { completion(NO, YES); return; }
     auto hp = _hp;
     BOOL isV2 = _bt->getProtocolVersion() == SonyProtocolVersion::V2;
-    dispatch_async(_cmdQueue, ^{
-        // The headphone's physical button only changes ambient/NC, so that's all we poll (keeps traffic low).
-        // requestAmbientState() is protocol-aware (v2 uses 66 17, v1 uses 66 02), so this is safe on both.
-        try { hp->requestAmbientState(); } catch (std::exception &exc) {}
-        // Battery drains, earbuds get docked and the case charges them, so re-read it too - but only
-        // every Nth poll, since it costs up to three inquiries on TWS. v2 only: 0x22 is POWER_OFF on v1.
-        if (isV2 && self->_dynamicTick++ % kBatteryPollEveryNTicks == 0) {
-            try { hp->requestBattery(); } catch (std::exception &exc) {}
+    [self enqueueSessionWork:^{
+        auto before = self->_bt->successfulResponseCount();
+        try { hp->requestAmbientState(); } catch (const std::exception &exc) {}
+        bool ambientReplied = self->_bt->successfulResponseCount() != before;
+        // A missing/unsupported ANC read alone is not evidence of session loss.
+        // Count actual matched replies: requestBattery deliberately catches some
+        // unsupported-layout errors, so a normal return is not proof of life.
+        if (!ambientReplied || (isV2 && self->_dynamicTick++ % kBatteryPollEveryNTicks == 0)) {
+            try { hp->requestBattery(); } catch (const std::exception &exc) {}
         }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(); });
-    });
+        bool replied = self->_bt->successfulResponseCount() != before;
+        auto state = self->_sessionHealth.record(replied);
+        BOOL lost = state == ControlSessionHealth::State::Unresponsive;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(replied, lost);
+        });
+    }];
 }
 
 - (void)setEqualizerPreset:(NSInteger)preset completion:(void (^)(BOOL, NSString * _Nullable))completion {
@@ -549,7 +592,7 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         return;
     }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil;
         BOOL ok = YES;
         try {
@@ -564,9 +607,10 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
             error = @(exc.what());
         }
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
             completion(ok, error);
         });
-    });
+    }];
 }
 
 - (void)setCustomEqualizerBass:(NSInteger)bass bands:(NSArray<NSNumber *> *)bands preset:(NSInteger)preset completion:(void (^)(BOOL, NSString * _Nullable))completion {
@@ -578,7 +622,7 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     for (NSNumber *n in bands) cbands.push_back((int)n.integerValue);
     int cbass = (int)bass;
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil; BOOL ok = YES;
         try {
             hp->setEqualizerCustom(cbass, cbands, static_cast<EQ_PRESET>(preset));
@@ -594,8 +638,11 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
                 return matches;
             }, "The headphones did not apply the custom EQ curve.");
         } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(ok, error);
+        });
+    }];
 }
 
 - (void)setDsee:(BOOL)enabled completion:(void (^)(BOOL, NSString * _Nullable))completion {
@@ -604,7 +651,7 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         return;
     }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil; BOOL ok = YES;
         try {
             hp->setDsee(enabled);
@@ -613,8 +660,11 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
                 return hp->getDsee() == (bool)enabled;
             }, "The headphones did not apply the DSEE setting.");
         } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(ok, error);
+        });
+    }];
 }
 
 - (void)applyMode:(SHCAmbientMode)mode
@@ -628,7 +678,7 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
     }
 
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil;
         BOOL ok = YES;
         try {
@@ -678,15 +728,16 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         // suppressed and the UI freezes on a value the headphones never took.
         if (!ok) hp->discardAmbientChanges();
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
             completion(ok, error);
         });
-    });
+    }];
 }
 
 - (void)setAutoPowerOff:(NSInteger)index completion:(void (^)(BOOL, NSString * _Nullable))completion {
     if (!_hp || !self.connected) { completion(NO, @"Not connected."); return; }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil; BOOL ok = YES;
         try {
             hp->setAutoPowerOff((int)index);
@@ -695,14 +746,17 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
                 return hp->getAutoPowerOff() == index;
             }, "The headphones did not apply the auto power-off setting.");
         } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(ok, error);
+        });
+    }];
 }
 
 - (void)setSpeakToChat:(BOOL)enabled completion:(void (^)(BOOL, NSString * _Nullable))completion {
     if (!_hp || !self.connected) { completion(NO, @"Not connected."); return; }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil; BOOL ok = YES;
         try {
             hp->setSpeakToChat(enabled);
@@ -711,24 +765,30 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
                 return hp->getSpeakToChat() == (bool)enabled;
             }, "The headphones did not apply the Speak-to-Chat setting.");
         } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(ok, error);
+        });
+    }];
 }
 
 - (void)setAdaptiveVolume:(BOOL)enabled completion:(void (^)(BOOL, NSString * _Nullable))completion {
     if (!_hp || !self.connected) { completion(NO, @"Not connected."); return; }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil; BOOL ok = YES;
         try { hp->setAdaptiveVolume(enabled); } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
-        dispatch_async(dispatch_get_main_queue(), ^{ completion(ok, error); });
-    });
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
+            completion(ok, error);
+        });
+    }];
 }
 
 - (void)setMultipoint:(BOOL)enabled completion:(void (^)(BOOL, NSString * _Nullable))completion {
     if (!_hp || !self.connected) { completion(NO, @"Not connected."); return; }
     auto hp = _hp;
-    dispatch_async(_cmdQueue, ^{
+    [self enqueueSessionWork:^{
         NSString *error = nil; BOOL ok = YES;
         try { hp->setMultipoint(enabled); } catch (std::exception &exc) { ok = NO; error = @(exc.what()); }
         // XM4C must restart and reconnect before fresh reads; the model owns that one-shot flow.
@@ -738,10 +798,11 @@ static NSString *_Nullable SHCSourceSwitchError(int result) {
         }
         NSString *attemptDiagnostics = @(hp->getMultipointDiagnostics().c_str());
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_hp != hp) return;
             self->_lastMultipointWriteDiagnostics = attemptDiagnostics;
             completion(ok, error);
         });
-    });
+    }];
 }
 
 @end

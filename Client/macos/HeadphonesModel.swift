@@ -28,6 +28,9 @@ final class HeadphonesModel: ObservableObject {
 
     @Published var connected = false
     @Published var connecting = false
+    @Published private(set) var controlSessionChecking = false
+    private var dynamicRefreshInFlight = false
+    private var statusRefreshInFlight = false
     @Published var deviceName = ""
     @Published var supportsVpt = false
     @Published var maxAmbientLevel = 20
@@ -166,7 +169,8 @@ final class HeadphonesModel: ObservableObject {
         connectionNotice = nil
         // Defer so SwiftUI can render the "Connecting…" state before the modal picker blocks the main thread.
         DispatchQueue.main.async {
-            self.bridge.scanAndConnect { ok, error in
+            guard self.connectionInfoGeneration == generation else { return }
+            let completion: (Bool, String?) -> Void = { ok, error in
                 guard self.connectionInfoGeneration == generation else { return }
                 self.connecting = false
                 if ok {
@@ -179,11 +183,22 @@ final class HeadphonesModel: ObservableObject {
                     self.errorMessage = error
                 }
             }
+            // Resume the same headset; do not accidentally select another paired device.
+            if self.deviceMac.isEmpty {
+                self.bridge.scanAndConnect(completion: completion)
+            } else {
+                self.bridge.reconnect(toAddress: self.deviceMac, completion: completion)
+            }
         }
     }
 
     func refreshStatus() {
-        bridge.refreshStatus {
+        guard connected, !statusRefreshInFlight else { return }
+        statusRefreshInFlight = true
+        let generation = connectionInfoGeneration
+        bridge.refreshStatus { finished in
+            guard self.connectionInfoGeneration == generation else { return }
+            if finished { self.statusRefreshInFlight = false }
             if !self.pushInFlight { self.syncFromBridge() }
             self.syncBatteryFromBridge()
             self.eqPreset = self.bridge.eqPreset
@@ -220,7 +235,7 @@ final class HeadphonesModel: ObservableObject {
                 }
             }
             // Speak-to-Chat capability is only confirmed by the probeCapabilities pass
-            // (the second completion), so this stays armed until then and fires at most
+            // (the final completion), so this stays armed until then and fires at most
             // once per connect. The device stays untouched unless it reports S2C on.
             if self.s2cAutoDisablePending && self.hasSpeakToChat {
                 self.s2cAutoDisablePending = false
@@ -232,14 +247,19 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func refreshMultipoint() {
+        guard connected, !controlSessionChecking, !refreshingMultipoint,
+              !multipointBusy, !dynamicRefreshInFlight, !statusRefreshInFlight else { return }
         refreshingMultipoint = true
+        let generation = connectionInfoGeneration
         bridge.refreshMultipoint {
+            guard self.connectionInfoGeneration == generation else { return }
             self.refreshingMultipoint = false
             self.syncMultipointFromBridge()
         }
     }
 
     func switchPlayback(to device: PairedDeviceInfo, fix: Bool) {
+        guard connected, !controlSessionChecking else { return }
         multipointBusy = true
         errorMessage = nil
         bridge.switchPlayback(toAddress: device.address, fix: fix) { ok, error in
@@ -250,6 +270,7 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func setPlaybackPinned(_ pinned: Bool) {
+        guard connected, !controlSessionChecking else { return }
         multipointBusy = true
         errorMessage = nil
         bridge.setPlaybackPinned(pinned) { ok, error in
@@ -291,19 +312,21 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func setAutoPowerOff(_ index: Int) {
+        guard connected, !controlSessionChecking else { return }
         autoPowerOff = index
         errorMessage = nil
         bridge.setAutoPowerOff(index) { ok, error in if !ok, let e = error { self.errorMessage = e } }
     }
 
     func setSpeakToChat(_ on: Bool) {
+        guard connected, !controlSessionChecking else { return }
         speakToChat = on
         errorMessage = nil
         bridge.setSpeakToChat(on) { ok, error in if !ok, let e = error { self.errorMessage = e } }
     }
 
     func refreshConnectionInfo() {
-        guard connected, !refreshingConnectionInfo else { return }
+        guard connected, !controlSessionChecking, !refreshingConnectionInfo else { return }
         refreshingConnectionInfo = true
         let generation = connectionInfoGeneration
         bridge.refreshConnectionInfo { ok, error in
@@ -316,7 +339,7 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func setSpeakToChatTimeout(_ option: Int) {
-        guard connected, hasSpeakToChatTiming, !speakToChatTimingBusy else { return }
+        guard connected, !controlSessionChecking, hasSpeakToChatTiming, !speakToChatTimingBusy else { return }
         speakToChatTimingBusy = true
         errorMessage = nil
         bridge.setSpeakToChatTimeout(option) { ok, error in
@@ -327,13 +350,14 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func setAdaptiveVolume(_ on: Bool) {
+        guard connected, !controlSessionChecking else { return }
         adaptiveVolume = on
         errorMessage = nil
         bridge.setAdaptiveVolume(on) { ok, error in if !ok, let e = error { self.errorMessage = e } }
     }
 
     func setMultipoint(_ on: Bool) {
-        guard connected, canSetMultipoint, !multipointBusy, on != multipointEnabled else { return }
+        guard connected, !controlSessionChecking, canSetMultipoint, !multipointBusy, on != multipointEnabled else { return }
         let needsReconnect = bridge.multipointRequiresReconnect
         let address = deviceMac
         multipointBusy = true
@@ -411,17 +435,22 @@ final class HeadphonesModel: ObservableObject {
         stopDynamicPolling()
         var tick = 0
         dynamicTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self = self, self.connected else { return }
-            // Every 5th tick (10 s), also re-read which device has playback, so the menu-bar icon follows
-            // changes made from the phone. Skipped while a multipoint write or refresh is in flight.
+            guard let self = self, self.connected, !self.multipointBusy,
+                  !self.dynamicRefreshInFlight, !self.refreshingMultipoint,
+                  !self.statusRefreshInFlight else { return }
+            self.dynamicRefreshInFlight = true
+            let generation = self.connectionInfoGeneration
             tick += 1
-            if tick % 5 == 0 && self.hasPairedDevices && !self.multipointBusy && !self.refreshingMultipoint {
-                self.bridge.refreshMultipoint { self.syncMultipointFromBridge() }
-            }
-            self.bridge.refreshDynamic {
-                // Only publish what refreshDynamic actually re-read: ambient/NC state and the battery.
-                // EQ and DSEE aren't re-read on this path - they'd come straight back from the C++ cache,
-                // so a failed write would snap back two seconds later and an EQ drag would fight the timer.
+            self.bridge.refreshDynamic { responsive, sessionLost in
+                guard self.connectionInfoGeneration == generation else { return }
+                self.dynamicRefreshInFlight = false
+                if sessionLost {
+                    self.finishControlSession(unresponsive: true)
+                    return
+                }
+                self.controlSessionChecking = !responsive
+                guard responsive else { return }
+                // Publish only fresh basic state, never overwrite EQ/DSEE from a cache.
                 if !self.pushInFlight {
                     self.assignIfChanged(\.mode, self.bridge.mode)
                     self.assignIfChanged(\.hasWindNoiseReduction, self.bridge.hasWindNoiseReduction)
@@ -430,6 +459,11 @@ final class HeadphonesModel: ObservableObject {
                 let level = self.bridge.ambientLevel
                 if level > 0 { self.assignIfChanged(\.ambientLevel, level) }
                 self.syncBatteryFromBridge()
+                // Optional reads never decide session health, and never pile up behind a heartbeat.
+                if self.protocolVersion == "v2" &&
+                    ((self.hasPairedDevices && tick % 5 == 0) || tick % 15 == 0) {
+                    self.refreshMultipoint()
+                }
             }
         }
     }
@@ -442,6 +476,7 @@ final class HeadphonesModel: ObservableObject {
     // The controls below update optimistically and are corrected here if the write failed, rather than
     // being silently overwritten by the next poll tick.
     func setEqualizer(_ preset: Int) {
+        guard connected, !controlSessionChecking else { return }
         guard !equalizerSelecting else { return }
         if eqInFlight {
             pendingEqSelection = preset
@@ -473,6 +508,7 @@ final class HeadphonesModel: ObservableObject {
 
     // Editable EQ: retain Manual / Custom 1 / Custom 2 while coalescing slider writes.
     func applyCustomEq() {
+        guard connected, !controlSessionChecking else { return }
         guard !equalizerSelecting else { return }
         if !EQPresets.isEditable(eqPreset) { eqPreset = 0xA0 }
         errorMessage = nil
@@ -506,6 +542,7 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func setDsee(_ on: Bool) {
+        guard connected, !controlSessionChecking else { return }
         guard connected, supportsDsee, !dseeBusy else { return }
         dseeBusy = true
         dsee = on
@@ -522,7 +559,7 @@ final class HeadphonesModel: ObservableObject {
     func releaseControlToPhone() {
         disconnect()
         errorMessage = nil
-        connectionNotice = "Control released. You can now open Sound Connect on your phone."
+        connectionNotice = "Control released for your phone. Bluetooth audio can continue. Close Sound Connect on your phone before pressing Connect to resume control on this Mac."
     }
 
     func disconnect() {
@@ -532,6 +569,16 @@ final class HeadphonesModel: ObservableObject {
         multipointExpectedAfterReconnect = nil
         connecting = false
         multipointBusy = false
+        controlSessionChecking = false
+        dynamicRefreshInFlight = false
+        statusRefreshInFlight = false
+        refreshingMultipoint = false
+        refreshingConnectionInfo = false
+        pushInFlight = false
+        eqInFlight = false
+        equalizerSelecting = false
+        dseeBusy = false
+        speakToChatTimingBusy = false
         connectionInfoGeneration += 1
         stopWatchingConnection()
         stopDynamicPolling()
@@ -545,31 +592,32 @@ final class HeadphonesModel: ObservableObject {
         syncMultipointFromBridge()
     }
 
-    // The headset can drop the RFCOMM link on its own (idle power-save). Poll so the UI reflects reality
-    // instead of showing a stale "Connected" state.
+    // An open RFCOMM channel is not proof that Sony commands still work.
+    // Physical closure and repeated heartbeat failure converge on the same cleanup.
+    private func finishControlSession(unresponsive: Bool) {
+        let bluetoothStillConnected = bridge.systemBluetoothConnected
+        let changingMultipoint = multipointBusy
+        disconnect()
+        errorMessage = nil
+        if changingMultipoint {
+            errorMessage = "The headset closed the connection while changing multipoint. Press Connect to read its current setting."
+        } else if unresponsive {
+            connectionNotice = "The headset stopped responding to SonyBridge. Control was released; Bluetooth audio may still work. Close Sound Connect on your phone, then press Connect to resume."
+        } else if bluetoothStillConnected {
+            connectionNotice = "The control connection closed. Bluetooth audio may still work. If Sound Connect is open on your phone, close it before pressing Connect."
+        } else {
+            connectionNotice = "Bluetooth disconnected. Turn on the headset and press Connect."
+        }
+        // Never automatically compete with another controller. Connect is a fresh,
+        // user-requested handshake; no setting or playback command is replayed.
+    }
+
     private func startWatchingConnection() {
         stopWatchingConnection()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            if self.connected && !self.bridge.connected {
-                self.connected = false
-                self.deviceName = ""
-                if self.multipointBusy {
-                    self.connectionNotice = nil
-                    self.errorMessage = "The headset closed the connection while changing multipoint. Press Connect to read its current setting."
-                } else if self.bridge.systemBluetoothConnected {
-                    self.errorMessage = nil
-                    self.connectionNotice = "Control connection closed. To use SonyBridge, close Sound Connect on your phone and reconnect."
-                } else {
-                    self.errorMessage = nil
-                    self.connectionNotice = "Bluetooth disconnected. If the headset is off, turn it on and reconnect."
-                }
-                self.stopWatchingConnection()
-                self.stopDynamicPolling()
-                // Release the dead session too, so a reconnect starts clean and the device list doesn't
-                // linger with Fix/Switch enabled.
-                self.bridge.disconnect()
-                self.syncMultipointFromBridge()
+            if !self.bridge.connected {
+                self.finishControlSession(unresponsive: false)
             }
         }
     }
@@ -580,21 +628,25 @@ final class HeadphonesModel: ObservableObject {
     }
 
     func setMode(_ newMode: SHCAmbientMode) {
+        guard connected, !controlSessionChecking else { return }
         mode = newMode
         pushState()
     }
 
     func setLevel(_ level: Int) {
+        guard connected, !controlSessionChecking else { return }
         ambientLevel = level
         if mode == .ambientSound { pushState() }
     }
 
     func setWindNoiseReduction(_ on: Bool) {
+        guard connected, !controlSessionChecking else { return }
         windNoiseReduction = on
         pushState()
     }
 
     func setFocusOnVoice(_ on: Bool) {
+        guard connected, !controlSessionChecking else { return }
         focusOnVoice = on
         pushState()
     }
