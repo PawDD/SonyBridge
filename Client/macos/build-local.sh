@@ -54,8 +54,8 @@ for folder in (root/'Client/macos/Assets.xcassets').glob('*.imageset'):
   if 'filename' in item:
    src=folder/item['filename'];shutil.copy2(src,res/(folder.stem+src.suffix));break
 info=plistlib.loads((root/'Client/macos/info.plist').read_bytes());info['CFBundleIconFile']='AppIcon';info['LSMinimumSystemVersion']='12.0'
-info['CFBundleShortVersionString']='0.4.2-local'
-info['CFBundleVersion']='0.4.2'
+info['CFBundleShortVersionString']='0.4.3-local'
+info['CFBundleVersion']='0.4.3'
 (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
 (res/'LOCAL-BUILD.txt').write_text(
  'Local preview; not a release. Compiled reference resources reused.\n'

@@ -46,7 +46,7 @@ SonyBridge reports a closed control connection separately from a lost system Blu
 
 ## Download and install on macOS
 
-**Version 0.4.2 supersedes 0.4.1.** It restores the approved macOS SDK 27.2 appearance, fixes multipoint alert setup and improves recovery when the headset restarts before its final acknowledgement. It also simplifies the connected-device panel. See the [changelog](CHANGELOG.md).
+**Version 0.4.3 supersedes 0.4.2.** It improves recovery from unresponsive headset control sessions, makes it easier to resume control after using the phone app, and animates equalizer preset transitions. See the [changelog](CHANGELOG.md).
 
 Download **SonyBridge XM4C.dmg** from [this fork's latest release](https://github.com/PawDD/SonyBridge/releases/latest). Use the current macOS release. The filename stays simple; the source revision is recorded inside the app. The upstream Homebrew cask and upstream downloads do not contain this fork's changes.
 
@@ -57,7 +57,7 @@ Download **SonyBridge XM4C.dmg** from [this fork's latest release](https://githu
 
 No Terminal commands or Homebrew are needed. Existing preferences may survive removal of an earlier app. Hardware validation is limited to the configurations and features documented above.
 
-The macOS installer requires **Xcode with macOS SDK 27.2**. The build rejects a different SDK. [macOS Actions](https://github.com/PawDD/SonyBridge/actions/workflows/xcodebuild.yml) runs regression tests; installer generation and artifact upload are skipped when the runner does not have that SDK. The 0.4.2 installer is prepared locally from source with the approved Xcode toolchain, not from the older runner SDK.
+The macOS installer requires **Xcode with macOS SDK 27.2**. The build rejects a different SDK. [macOS Actions](https://github.com/PawDD/SonyBridge/actions/workflows/xcodebuild.yml) runs regression tests; installer generation and artifact upload are skipped when the runner does not have that SDK. The installer is prepared locally from source with the approved Xcode toolchain when the runner does not have that SDK.
 
 ## Build and test
 
